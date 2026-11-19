@@ -1,0 +1,2364 @@
+import os
+import time
+import json
+import html
+import sqlite3
+import datetime as dt
+import hashlib
+import re
+import logging
+import threading
+from collections import defaultdict, deque
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl, urlencode as encode_query
+
+import requests
+import feedparser
+from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+
+from scrapers import (
+    split_pipe_specs,
+    fetch_rss_with_tls_fallback,
+    scrape_single_html_target as _scrape_single_html_target_impl,
+)
+
+load_dotenv()
+
+# =========================
+# Logging
+# =========================
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").strip().upper(), logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("ai_stack_quantum_bot")
+
+# =========================
+# Environment helpers
+# =========================
+
+
+def get_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def get_float(name, default):
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def get_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ["1", "true", "yes", "y", "on"]
+
+
+def get_csv(name, default_values=None):
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return list(default_values or [])
+    for separator in ["|", ";"]:
+        raw = raw.replace(separator, ",")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def get_feed_specs(name, default_specs=None):
+    """Parse feed/page specs from .env using regex-safe pipe splitting.
+    Format:
+    SOURCE_NAME=https://feed.url|OTHER_SOURCE=https://other.url
+    """
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return list(default_specs or [])
+    specs = []
+    for part in split_pipe_specs(raw):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            label, url = part.split("=", 1)
+        elif "::" in part:
+            label, url = part.split("::", 1)
+        else:
+            label, url = part, part
+        label = clean_text(label) if "clean_text" in globals() else label.strip()
+        url = url.strip()
+        if label and url:
+            specs.append((label, url))
+    return specs or list(default_specs or [])
+
+
+# =========================
+# Configuration
+# =========================
+
+DB_PATH = os.getenv("DB_PATH", "/app/data/ai_stack_quantum_trends.db").strip()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash").strip()
+
+FETCH_MINUTES = get_int("FETCH_MINUTES", 10)
+DIGEST_MINUTES = get_int("DIGEST_MINUTES", 360)
+
+MAX_CANDIDATES_PER_RUN = get_int("MAX_CANDIDATES_PER_RUN", 180)
+MAX_CANDIDATES_PER_FLUSH = get_int("MAX_CANDIDATES_PER_FLUSH", 96)
+CANDIDATE_QUEUE_MAX = get_int("CANDIDATE_QUEUE_MAX", 360)
+
+LLM_BATCH_SIZE = max(1, get_int("LLM_BATCH_SIZE", 8))
+LLM_MIN_SCORE = get_float("LLM_MIN_SCORE", 7.0)
+ALERT_THRESHOLD = get_float("ALERT_THRESHOLD", 8.5)
+
+ARXIV_RESULTS_PER_CATEGORY = get_int("ARXIV_RESULTS_PER_CATEGORY", 20)
+HN_NEW_STORIES_PER_RUN = get_int("HN_NEW_STORIES_PER_RUN", 80)
+TECHMEME_MAX_ITEMS = get_int("TECHMEME_MAX_ITEMS", 40)
+
+MAX_ALERTS_PER_FLUSH = get_int("MAX_ALERTS_PER_FLUSH", 8)
+DIGEST_MAX_ITEMS = get_int("DIGEST_MAX_ITEMS", 10)
+SEND_EMPTY_DIGEST = get_bool("SEND_EMPTY_DIGEST", False)
+INCLUDE_ALERTS_IN_DIGEST = get_bool("INCLUDE_ALERTS_IN_DIGEST", False)
+SEND_RAW_FETCH_REPORT = get_bool("SEND_RAW_FETCH_REPORT", False)
+SEND_RAW_FETCH_JSON = get_bool("SEND_RAW_FETCH_JSON", False)
+
+ENABLE_ARXIV = get_bool("ENABLE_ARXIV", True)
+ENABLE_HACKERNEWS = get_bool("ENABLE_HACKERNEWS", True)
+ENABLE_TECHMEME = get_bool("ENABLE_TECHMEME", True)
+
+DEBUG_LLM = get_bool("DEBUG_LLM", False)
+SEND_STARTUP_MESSAGE = get_bool("SEND_STARTUP_MESSAGE", True)
+
+QUEUE_FLUSH_LIMIT = get_int("QUEUE_FLUSH_LIMIT", 32)
+CHECK_QUEUE_SECONDS = get_int("CHECK_QUEUE_SECONDS", 60)
+FORCE_FLUSH_MINUTES = get_int("FORCE_FLUSH_MINUTES", 30)
+
+MAX_ITEM_RETRIES = get_int("MAX_ITEM_RETRIES", 5)
+
+FEED_FAILURE_THRESHOLD = get_int("FEED_FAILURE_THRESHOLD", 4)
+FEED_COOLDOWN_MINUTES = get_int("FEED_COOLDOWN_MINUTES", 60)
+
+HN_FETCH_WORKERS = get_int("HN_FETCH_WORKERS", 8)
+ARXIV_FETCH_WORKERS = get_int("ARXIV_FETCH_WORKERS", 4)
+
+HEALTHCHECK_FILE = os.getenv("HEALTHCHECK_FILE", "/app/data/heartbeat.txt").strip()
+LLM_TEXT_FIELD_MAX_CHARS = get_int("LLM_TEXT_FIELD_MAX_CHARS", 500)
+
+DEFAULT_ARXIV_CATEGORIES = [
+    "cs.LG", "cs.CL", "cs.DC", "cs.PL", "cs.DB", "cs.SE", "cs.IR", "cs.HC", "quant-ph",
+]
+ARXIV_CATEGORIES = get_csv("ARXIV_CATEGORIES", DEFAULT_ARXIV_CATEGORIES)
+
+# Step 1: Specialist AI software stack & quantum media/engineering feeds
+ENABLE_SPECIALIST_RSS = get_bool("ENABLE_SPECIALIST_RSS", True)
+SPECIALIST_RSS_MAX_ITEMS_PER_FEED = get_int("SPECIALIST_RSS_MAX_ITEMS_PER_FEED", 12)
+DEFAULT_SPECIALIST_RSS_FEEDS = [
+    ("PyTorch Blog", "https://pytorch.org/feed.xml;;https://pytorch.org/blog/feed.xml"),
+    ("Hugging Face Blog", "https://huggingface.co/blog/feed.xml"),
+    ("NVIDIA Developer Blog", "https://developer.nvidia.com/blog/feed/"),
+    ("DuckDB Blog", "https://duckdb.org/feed.xml"),
+    ("LangChain Blog", "https://blog.langchain.com/rss/"),
+    ("Qdrant Blog", "https://qdrant.tech/blog/index.xml"),
+    ("Quantum Computing Report", "https://quantumcomputingreport.com/feed/"),
+    ("The Quantum Insider", "https://thequantuminsider.com/feed/"),
+    ("The Register AI", "https://www.theregister.com/software/ai_ml/headlines.atom"),
+]
+
+# Step 2: Core OSS ecosystem releases & engineering commit feeds (GitHub Atom)
+ENABLE_ECOSYSTEM_RELEASES_RSS = get_bool("ENABLE_ECOSYSTEM_RELEASES_RSS", True)
+ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED = get_int("ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED", 8)
+DEFAULT_ECOSYSTEM_RELEASES_RSS_FEEDS = [
+    ("vLLM Releases", "https://github.com/vllm-project/vllm/releases.atom"),
+    ("vLLM Daily", "https://github.com/vllm-project/vllm-daily/commits/main.atom"),
+    ("llama.cpp Releases", "https://github.com/ggml-org/llama.cpp/releases.atom"),
+    ("PyTorch Releases", "https://github.com/pytorch/pytorch/releases.atom"),
+    ("Ray Releases", "https://github.com/ray-project/ray/releases.atom"),
+    ("Polars Releases", "https://github.com/pola-rs/polars/releases.atom"),
+    ("LiteLLM Releases", "https://github.com/BerriAI/litellm/releases.atom"),
+    ("Open WebUI Releases", "https://github.com/open-webui/open-webui/releases.atom"),
+    ("Qiskit Releases", "https://github.com/Qiskit/qiskit/releases.atom"),
+]
+
+# Step 2b: Dedicated & Universal HTML Scrapers
+ENABLE_HTML_SCRAPER = get_bool("ENABLE_HTML_SCRAPER", True)
+HTML_SCRAPER_MAX_ITEMS_PER_SITE = get_int("HTML_SCRAPER_MAX_ITEMS_PER_SITE", 12)
+DEFAULT_HTML_SCRAPER_TARGETS = [
+    ("vLLM Blog", "https://vllm.ai/blog"),
+    ("Unsloth Blog", "https://unsloth.ai/blog"),
+    ("Ollama Blog", "https://ollama.com/blog"),
+    ("Polars Blog", "https://pola.rs/posts/"),
+    ("AMD ROCm Blogs", "https://rocm.blogs.amd.com/"),
+]
+
+# Step 3: Optional SEC EDGAR EFTS full-text search
+ENABLE_SEC_EDGAR = get_bool("ENABLE_SEC_EDGAR", False)
+SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "AI-Stack-Quantum-Bot/1.0 contact@example.com").strip()
+SEC_FORMS = get_csv("SEC_FORMS", ["8-K", "10-Q", "10-K", "S-1", "F-1", "20-F", "6-K"])
+SEC_LOOKBACK_DAYS = get_int("SEC_LOOKBACK_DAYS", 3)
+SEC_MAX_ITEMS_PER_FETCH = get_int("SEC_MAX_ITEMS_PER_FETCH", 40)
+DEFAULT_SEC_EFTS_QUERY = (
+    '"CUDA" OR "ROCm" OR "TensorRT" OR "vLLM" OR "FlashAttention" '
+    'OR "vector database" OR "quantization" OR "quantum computing" '
+    'OR "logical qubit" OR "fault-tolerant quantum" OR "quantum error correction"'
+)
+SEC_EFTS_QUERY = os.getenv("SEC_EFTS_QUERY", DEFAULT_SEC_EFTS_QUERY).strip()
+
+
+# =========================
+# Unified Domain Taxonomy (Strictly Scoped to the 8 AI Software Stack Layers + Quantum Computing)
+# =========================
+STACK_DOMAIN_TAXONOMY = [
+    {
+        "layer": "1. Data Engineering & Preprocessing",
+        "bottleneck": "data throughput / GPU utilization / tokenization efficiency",
+        "subtopics": [
+            (
+                "Data Wrangling & Pipeline Orchestration (Apache Spark, Ray Data, Polars, DuckDB, MinHash LSH, fastText, PII redaction)",
+                re.compile(
+                    r"\b(Apache\s+Spark|PySpark|Ray\s+Data|\bPolars\b|\bDuckDB\b|MinHash\s+LSH|deduplication|heuristic\s+filtering|fastText|PII\s+redaction|petabyte-scale\s+(?:data|pipeline)|GPU\s+(?:data\s+starvation|under-?utilization)|data\s+contamination)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Tokenization Engines (Hugging Face Tokenizers, tiktoken, SentencePiece, BPE, Unigram, vocabulary fertility)",
+                re.compile(
+                    r"\b(Hugging\s+Face\s+Tokenizers?|tiktoken|SentencePiece|byte-?pair\s+encoding|\bBPE\b\s+tokeniz|Unigram\s+tokeniz|subword\s+(?:splitting|tokenization)|token-?to-?word\s+ratio|tokenizer\s+(?:fertility|compression|throughput))\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "2. Deep Learning Frameworks & Distributed Training",
+        "bottleneck": "training scale / memory OOM / pipeline bubble / alignment",
+        "subtopics": [
+            (
+                "Core Frameworks (PyTorch, JAX, TensorFlow, torch.compile, TorchDynamo, TorchInductor, autograd)",
+                re.compile(
+                    r"\b(PyTorch|\bJAX\b|TensorFlow|torch\.compile|TorchDynamo|TorchInductor|TorchTitan|automatic\s+kernel\s+fusion|autograd\s+engine|XLA\s+compiler)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Distributed Parallelism & Scaling Engines (DeepSpeed, Megatron-LM, FSDP, PyTorch Distributed, Ray Train, TP/PP/ZeRO)",
+                re.compile(
+                    r"\b(DeepSpeed|Megatron-?LM|\bFSDP2?\b|PyTorch\s+Distributed|Ray\s+Train|tensor\s+parallelism|pipeline\s+parallelism|Zero\s+Redundancy\s+Optimizer|ZeRO\s+Stage\s+[123]|pipeline\s+bubble|3D\s+parallelism|context\s+parallelism)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Fine-Tuning & Alignment Libraries (Hugging Face TRL, Unsloth, Axolotl, PEFT, LoRA, QLoRA, SFT, RLHF, DPO, KTO)",
+                re.compile(
+                    r"\b(Hugging\s+Face\s+TRL|\bTRL\b.*?(?:RLHF|DPO|SFT|KTO|GRPO)|Unsloth|Axolotl|\bPEFT\b|\bLoRA\b|\bQLoRA\b|Direct\s+Preference\s+Optimization|\bDPO\b.*?(?:align|fine-?tun|LLM)|\bKTO\b.*?(?:align|fine-?tun)|\bRLHF\b|post-?training\s+alignment)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "3. Low-Level GPU Acceleration & Acceleration Kernels",
+        "bottleneck": "kernel FLOPs / HBM-SRAM IO / collective communication",
+        "subtopics": [
+            (
+                "Hardware Drivers & Compute Platforms (NVIDIA CUDA, AMD ROCm, Intel oneAPI, streaming multiprocessors)",
+                re.compile(
+                    r"\b(NVIDIA\s+CUDA|\bCUDA\b\s+(?:1[23]\.\d|kernel|driver|runtime|PTX|graph)|AMD\s+ROCm|\bROCm\b\s+[67]\.\d|Intel\s+oneAPI|streaming\s+multiprocessor|kernel\s+launch\s+(?:overhead|failure))\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Low-Level Math & Primitive Libraries (cuDNN, cuBLAS, CUTLASS, GEMM, Hopper/Blackwell Tensor Cores)",
+                re.compile(
+                    r"\b(cuDNN|cuBLAS|cuBLASLt|CUTLASS|rocBLAS|MIOpen|\bGEMM\b\s+(?:kernel|tensor\s+core|FP8|FP4)|Hopper\s+tensor\s+core|Blackwell\s+tensor\s+core|WGMMA|tcgen05)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Inter-GPU Communication (NCCL, RCCL, AllReduce, AllGather, ReduceScatter, NVLink/NVSwitch/InfiniBand/RoCE)",
+                re.compile(
+                    r"\b(\bNCCL\b|\bRCCL\b|Collective\s+Communications\s+Library|AllReduce|AllGather|ReduceScatter|All-?to-?All\s+collective|NVLink.*?(?:NCCL|collective|AllReduce)|InfiniBand.*?RoCE|RDMA\s+collective)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Custom Fused Kernels (FlashAttention-2/3, vLLM PagedAttention, Triton, IO-aware HBM/SRAM fusion)",
+                re.compile(
+                    r"\b(FlashAttention(?:-[234])?|PagedAttention|OpenAI\s+Triton|Triton\s+(?:kernel|compiler|GPU)|fused\s+(?:GPU\s+)?kernel|IO-?aware\s+attention|HBM\s+(?:to|and)\s+SRAM|FlexAttention|FlashInfer)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "4. Model Optimization & Quantization",
+        "bottleneck": "model footprint / VRAM / perplexity / TTFT compilation",
+        "subtopics": [
+            (
+                "Quantization Toolkits (AutoGPTQ, AutoAWQ, bitsandbytes, llama.cpp, GGML, GGUF, INT8/INT4/FP8/FP4/k-quants)",
+                re.compile(
+                    r"\b(AutoGPTQ|AutoAWQ|bitsandbytes|llama\.cpp|\bGGML\b|\bGGUF\b|k-?quants?|GPTQ|AWQ|SmoothQuant|weight-?only\s+quantization|weight-?activation\s+quantization|(?:INT8|INT4|FP8|FP4|NVFP4|MXFP4)\s+quantization|perplexity\s+degradation)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Model Compilers & Engines (TensorRT-LLM, ONNX Runtime, Apache TVM, OpenVINO, operator fusion)",
+                re.compile(
+                    r"\b(TensorRT-?LLM|ONNX\s+Runtime|Apache\s+TVM|\bTVM\b\s+(?:compiler|graph|MLC)|OpenVINO|constant\s+folding|graph\s+compil(?:er|ation)\s+(?:GPU|NPU|edge)|time-?to-?first-?token|\bTTFT\b)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "5. Serving & Inference Engines",
+        "bottleneck": "inference throughput (QPS) / concurrency / KV-cache / edge latency",
+        "subtopics": [
+            (
+                "High-Throughput Engines (vLLM, TGI, TensorRT-LLM, Triton Inference Server, continuous batching, prefix caching)",
+                re.compile(
+                    r"\b(\bvLLM\b|Text\s+Generation\s+Inference|\bTGI\b\s+(?:serving|inference|Hugging\s+Face)|Triton\s+Inference\s+Server|SGLang|continuous\s+batching|iteration-?level\s+scheduling|prefix\s+caching|KV-?cache\s+(?:allocation|paging|offload|compression)|disaggregated\s+prefill)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Local & Edge Runtimes (Ollama, llama.cpp, ExLlamaV2, MLC-LLM, Metal/Apple Silicon, Vulkan, AVX-512)",
+                re.compile(
+                    r"\b(\bOllama\b|ExLlamaV2|ExLlamaV3|MLC-?LLM|Apple\s+Silicon\s+(?:Metal|MLX|inference)|Vulkan\s+(?:LLM|inference|llama\.cpp)|AVX-?512\s+(?:LLM|inference|quant)|local\s+LLM\s+runtime|offline\s+inference\s+engine)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "6. Application Orchestration, RAG & Middleware",
+        "bottleneck": "retrieval recall / RAG latency / structured output / prompt injection",
+        "subtopics": [
+            (
+                "Chaining & Agent Frameworks (LangChain, LangGraph, LlamaIndex, CrewAI, tool execution, state machines)",
+                re.compile(
+                    r"\b(LangChain|LangGraph|LlamaIndex|CrewAI|agent\s+state\s+machine|function\s+calling\s+orchestration|tool\s+execution\s+framework|agentic\s+drift|multi-?turn\s+agent\s+orchestration)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Vector Databases & Retrieval Engines (Milvus, Qdrant, Chroma, Pinecone, pgvector, HNSW, RAG recall)",
+                re.compile(
+                    r"\b(\bMilvus\b|\bQdrant\b|ChromaDB|\bChroma\b\s+vector|Pinecone|pgvector|vector\s+database|retrieval-?augmented\s+generation|\bRAG\b\s+(?:pipeline|retrieval|recall|latency|chunking|rerank)|HNSW\s+index|hybrid\s+vector\s+search)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Guardrails & Structured Parsing (Outlines, Instructor, NeMo Guardrails, Guidance, grammar-constrained decoding)",
+                re.compile(
+                    r"\b(Outlines\s+(?:structured|grammar|JSON|LLM)|Instructor\s+(?:structured|Pydantic|LLM)|NeMo\s+Guardrails|Microsoft\s+Guidance|grammar-?constrained\s+decoding|constrained\s+decoding|logit\s+masking|JSON\s+schema\s+(?:enforcement|decoding)|prompt\s+injection\s+(?:detection|defense|guardrail))\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "7. API Gateway & Model Routing",
+        "bottleneck": "gateway availability / failover / rate limiting / SSE streaming transport",
+        "subtopics": [
+            (
+                "Routing & Proxy Gateways (LiteLLM, Portkey, OpenResty, Envoy, Kong, fallback cascading, cost tracking)",
+                re.compile(
+                    r"\b(LiteLLM|Portkey|OpenResty|Envoy\s+(?:AI\s+)?(?:gateway|proxy)|Kong\s+(?:AI\s+)?gateway|LLM\s+(?:gateway|router|proxy)|model\s+routing|fallback\s+cascading|multi-?provider\s+failover|token\s+rate-?limiting)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Backend Web Frameworks (FastAPI, gRPC, Uvicorn, async dispatch, Server-Sent Events SSE streaming)",
+                re.compile(
+                    r"\b(FastAPI|\bgRPC\b.*?(?:LLM|inference|streaming|Triton|vLLM)|Uvicorn|Server-?Sent\s+Events|\bSSE\b\s+(?:streaming|transport|token)|async\s+(?:inference|request)\s+dispatch)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "8. End-User Presentation & Interface (UX)",
+        "bottleneck": "perceived latency / token streaming UX / error resilience",
+        "subtopics": [
+            (
+                "User Interfaces & Prototyping UIs (Open WebUI, LibreChat, Next.js Chat UI, Gradio, Streamlit, optimistic UI)",
+                re.compile(
+                    r"\b(Open\s+WebUI|LibreChat|Next\.js\s+(?:AI|chat)\s+(?:UI|interface|SDK)|Vercel\s+AI\s+SDK|\bGradio\b|\bStreamlit\b|token-?by-?token\s+streaming|optimistic\s+UI\s+update|markdown\s+(?:and\s+LaTeX|streaming)\s+render)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "9. Quantum Computing",
+        "bottleneck": "qubit fidelity / quantum error correction / fault tolerance / quantum compilers",
+        "subtopics": [
+            (
+                "Quantum Processors & Fault Tolerance (QPUs, superconducting/trapped-ion/neutral-atom/photonic/topological qubits, QEC, logical qubits)",
+                re.compile(
+                    r"\b(quantum\s+(?:comput(?:ing|ers?|ation)|processors?|accelerators?|interconnects?|error\s+correction|supremacy|advantage|chemistry|annealing|memory|networking)|\bQPUs?\b|logical\s+qubits?|superconducting\s+qubits?|trapped-?ion\s+qubits?|neutral-?atom\s+qubits?|photonic\s+qubits?|silicon\s+spin\s+qubits?|topological\s+qubits?|surface\s+codes?|qLDPC|\bQEC\b|fault-?tolerant\s+quantum|cryo-?CMOS)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Quantum Software Stacks, Compilers & Hybrid Algorithms (Qiskit, Cirq, PennyLane, CUDA-Q, Braket, VQE, QAOA)",
+                re.compile(
+                    r"\b(\bQiskit\b|\bCirq\b|PennyLane|CUDA-?Q|Amazon\s+Braket|pytket|quantum\s+(?:compiler|transpiler|SDK|circuit\s+optimization|simulation|middleware)|\bQAOA\b|\bVQE\b|hybrid\s+quantum-?classical)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+]
+
+
+def match_stack_signals(item):
+    """Scan item text equally across all 9 target domains (8 AI software stack layers + Quantum Computing)."""
+    haystack = " ".join(
+        [
+            clean_text(item.get("title", "")),
+            clean_text(item.get("raw_summary", "")),
+            clean_text(item.get("category", "")),
+        ]
+    )
+    if not haystack:
+        return []
+
+    matched = []
+    for entry in STACK_DOMAIN_TAXONOMY:
+        subs = [sub_name for sub_name, pat in entry["subtopics"] if pat.search(haystack)]
+        if subs:
+            matched.append(
+                {
+                    "layer": entry["layer"],
+                    "bottleneck": entry["bottleneck"],
+                    "subtopics": subs,
+                }
+            )
+    return matched
+
+
+def enrich_item_with_stack_signals(item):
+    """Tag candidate item in-place across all 9 target domains prior to capping and LLM classification."""
+    matches = match_stack_signals(item)
+    if not matches:
+        return item
+
+    layers = []
+    subtopics = []
+    for m in matches:
+        if m["layer"] not in layers:
+            layers.append(m["layer"])
+        for s in m["subtopics"]:
+            if s not in subtopics:
+                subtopics.append(s)
+
+    item["stack_signal_layers"] = " | ".join(layers)
+    item["stack_signal_subtopics"] = " ; ".join(subtopics)
+    item["stack_layer_hint"] = matches[0]["layer"]
+    item["bottleneck_hint"] = matches[0]["bottleneck"]
+    return item
+
+
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html, application/json;q=0.9, */*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+
+# ==========================================
+# Volatile staging queue
+# ==========================================
+
+CANDIDATE_QUEUE: list = []
+SEEN_URLS_CACHE: dict = {}
+SEEN_FINGERPRINTS_CACHE: dict = {}
+_queue_lock = Lock()
+_last_flush_time: dt.datetime = None  # type: ignore[assignment]
+
+FEED_FAILURE_STATE: dict = {}
+FEED_CACHE_HEADERS: dict = {}
+_feed_state_lock = Lock()
+
+_thread_local = threading.local()
+
+
+# =========================
+# Small utilities
+# =========================
+
+
+def utc_now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+_last_flush_time = utc_now()
+
+
+def clean_text(value):
+    if not value:
+        return ""
+    text = html.unescape(str(value))
+    text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(text.replace("\n", " ").replace("\t", " ").split())
+
+
+def safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def safe_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ["true", "1", "yes", "y", "on"]
+    return bool(value)
+
+
+def html_escape(value):
+    return html.escape(clean_text(value), quote=False)
+
+
+def normalize_url(url):
+    """Reduce duplicate URLs caused by tracking parameters."""
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url.strip())
+        tracking_prefixes = ("utm_",)
+        tracking_names = {"fbclid", "gclid", "mc_cid", "mc_eid", "igshid"}
+        query_pairs = []
+        for key, value in parse_qsl(parts.query, keep_blank_values=True):
+            key_lower = key.lower()
+            if key_lower.startswith(tracking_prefixes) or key_lower in tracking_names:
+                continue
+            query_pairs.append((key, value))
+        clean_query = encode_query(query_pairs, doseq=True)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, clean_query, ""))
+    except Exception:
+        return url.strip()
+
+
+def title_fingerprint(title):
+    """Stable article fingerprint for cross-source duplicate protection."""
+    cleaned = clean_text(title).lower()
+    cleaned = re.sub(r"https?://\S+", " ", cleaned)
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
+    cleaned = re.sub(r"\b(the|a|an|to|of|and|or|for|in|on|with|by|from|at|as|is|are)\b", " ", cleaned)
+    cleaned = " ".join(cleaned.split())[:220]
+    if not cleaned:
+        return ""
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+
+def item_fingerprint(item):
+    if item.get("content_fingerprint"):
+        return item["content_fingerprint"]
+    title = item.get("title", "")
+    if item.get("source_type") == "sec_filing":
+        base = title_fingerprint(title)
+        url_part = hashlib.sha256(item.get("url", "").encode("utf-8")).hexdigest()[:16]
+        return f"{base}:{url_part}"
+    return title_fingerprint(title)
+
+
+def feed_should_skip_live(feed_url):
+    with _feed_state_lock:
+        state = FEED_FAILURE_STATE.get(feed_url)
+        cooldown_until = state.get("cooldown_until") if state else None
+    return bool(cooldown_until and utc_now() < cooldown_until)
+
+
+def feed_record_result(feed_url, success):
+    with _feed_state_lock:
+        state = FEED_FAILURE_STATE.setdefault(feed_url, {"consecutive_failures": 0, "cooldown_until": None})
+        if success:
+            state["consecutive_failures"] = 0
+            state["cooldown_until"] = None
+        else:
+            state["consecutive_failures"] += 1
+            if state["consecutive_failures"] >= FEED_FAILURE_THRESHOLD:
+                state["cooldown_until"] = utc_now() + dt.timedelta(minutes=FEED_COOLDOWN_MINUTES)
+
+
+def ensure_db_directory():
+    directory = os.path.dirname(DB_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+
+def chunk_list(values, size):
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
+def fair_cap_items(items, max_items):
+    """Apply a global cap without letting one source dominate the run,
+    treating all sources and all 9 target domains equally while prioritizing signal-matched items within each source."""
+    for item in items:
+        enrich_item_with_stack_signals(item)
+
+    if max_items <= 0 or len(items) <= max_items:
+        return items
+
+    grouped_signal = defaultdict(list)
+    grouped_other = defaultdict(list)
+    source_order = []
+    for item in items:
+        source = item.get("source", "unknown")
+        if source not in grouped_signal and source not in grouped_other:
+            source_order.append(source)
+        if item.get("stack_signal_layers"):
+            grouped_signal[source].append(item)
+        else:
+            grouped_other[source].append(item)
+
+    grouped = {
+        source: deque(grouped_signal[source] + grouped_other[source])
+        for source in source_order
+    }
+
+    result = []
+    while len(result) < max_items and source_order:
+        next_order = []
+        for source in source_order:
+            if grouped[source] and len(result) < max_items:
+                result.append(grouped[source].popleft())
+            if grouped[source]:
+                next_order.append(source)
+        source_order = next_order
+    return result
+
+
+# =========================
+# Database (SQLite WAL)
+# =========================
+
+
+def connect_db():
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.row_factory = sqlite3.Row
+        _thread_local.conn = conn
+    return conn
+
+
+def init_db():
+    ensure_db_directory()
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE,
+            content_fingerprint TEXT,
+            title TEXT,
+            source TEXT,
+            source_type TEXT,
+            published_at TEXT,
+            category TEXT,
+            stack_layer TEXT,
+            bottleneck_addressed TEXT,
+            specific_tech TEXT,
+            relevance_score REAL,
+            why_it_matters TEXT,
+            ai_stack_thesis TEXT,
+            telegram_summary TEXT,
+            raw_summary TEXT,
+            raw_llm_json TEXT,
+            sent_alert INTEGER DEFAULT 0,
+            digest_sent INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_urls (
+            url TEXT PRIMARY KEY,
+            content_fingerprint TEXT,
+            title TEXT,
+            source TEXT,
+            source_type TEXT,
+            status TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_fingerprints (
+            content_fingerprint TEXT PRIMARY KEY,
+            title TEXT,
+            status TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
+
+    cur.execute("PRAGMA table_info(items)")
+    existing_columns = {row["name"] for row in cur.fetchall()}
+    wanted_columns = {
+        "content_fingerprint": "TEXT",
+        "stack_layer": "TEXT",
+        "bottleneck_addressed": "TEXT",
+        "ai_stack_thesis": "TEXT",
+    }
+    for column_name, column_type in wanted_columns.items():
+        if column_name not in existing_columns:
+            cur.execute(f"ALTER TABLE items ADD COLUMN {column_name} {column_type}")
+
+    cur.execute("PRAGMA table_info(processed_urls)")
+    existing_processed_columns = {row["name"] for row in cur.fetchall()}
+    if "content_fingerprint" not in existing_processed_columns:
+        cur.execute("ALTER TABLE processed_urls ADD COLUMN content_fingerprint TEXT")
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_items_fingerprint ON items(content_fingerprint)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_processed_urls_fingerprint ON processed_urls(content_fingerprint)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_items_alert ON items(sent_alert, relevance_score, created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_items_digest ON items(digest_sent, relevance_score, created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at)")
+    conn.commit()
+
+
+def get_state(key, default=None):
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM bot_state WHERE key = ?", (key,))
+    row = cur.fetchone()
+    return row["value"] if row else default
+
+
+def set_state(key, value):
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO bot_state (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, str(value)),
+    )
+    conn.commit()
+
+
+def get_hn_high_water_mark():
+    try:
+        return int(get_state("hn_high_water_mark", "0"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_hn_high_water_mark(value):
+    set_state("hn_high_water_mark", value)
+
+
+def processed_url_exists(url):
+    if not url:
+        return True
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM processed_urls WHERE url = ? LIMIT 1", (url,))
+    return cur.fetchone() is not None
+
+
+def processed_fingerprint_exists(content_fingerprint):
+    if not content_fingerprint:
+        return False
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM processed_fingerprints WHERE content_fingerprint = ? LIMIT 1",
+        (content_fingerprint,),
+    )
+    return cur.fetchone() is not None
+
+
+def mark_url_processed(item, status):
+    url = normalize_url(item.get("url", ""))
+    fp = item_fingerprint(item)
+    if not url and not fp:
+        return
+    now = utc_now().isoformat()
+    conn = connect_db()
+    cur = conn.cursor()
+
+    if url:
+        cur.execute(
+            """
+            INSERT INTO processed_urls (url, content_fingerprint, title, source, source_type, status, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                content_fingerprint = COALESCE(excluded.content_fingerprint, processed_urls.content_fingerprint),
+                title = excluded.title,
+                source = excluded.source,
+                source_type = excluded.source_type,
+                status = excluded.status,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                url,
+                fp,
+                item.get("title", ""),
+                item.get("source", ""),
+                item.get("source_type", ""),
+                status,
+                now,
+                now,
+            ),
+        )
+
+    if fp:
+        cur.execute(
+            """
+            INSERT INTO processed_fingerprints (content_fingerprint, title, status, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(content_fingerprint) DO UPDATE SET
+                title = excluded.title,
+                status = excluded.status,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (fp, item.get("title", ""), status, now, now),
+        )
+
+    conn.commit()
+
+
+def insert_item(item, sent_alert=0, digest_sent=0):
+    conn = connect_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO items (
+                url, content_fingerprint, title, source, source_type, published_at, category,
+                stack_layer, bottleneck_addressed, specific_tech,
+                relevance_score, why_it_matters, ai_stack_thesis,
+                telegram_summary, raw_summary, raw_llm_json,
+                sent_alert, digest_sent, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalize_url(item.get("url", "")),
+                item_fingerprint(item),
+                item.get("title", ""),
+                item.get("source", ""),
+                item.get("source_type", ""),
+                item.get("published_at", utc_now().isoformat()),
+                item.get("category", ""),
+                item.get("stack_layer", ""),
+                item.get("bottleneck_addressed", ""),
+                item.get("specific_tech", ""),
+                safe_float(item.get("relevance_score", 0)),
+                item.get("why_it_matters", ""),
+                item.get("ai_stack_thesis", ""),
+                item.get("telegram_summary", ""),
+                item.get("raw_summary", ""),
+                item.get("raw_llm_json", ""),
+                sent_alert,
+                digest_sent,
+                utc_now().isoformat(),
+            ),
+        )
+        conn.commit()
+        inserted = True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        inserted = False
+    return inserted
+
+
+# =========================
+# Telegram Delivery
+# =========================
+
+
+def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning("Telegram disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.")
+        return False
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    text = message.strip()
+    chunks = []
+
+    current = ""
+    for raw_line in text.splitlines():
+        line = raw_line[:3800]
+        proposed = f"{current}\n{line}" if current else line
+        if len(proposed) > 3800:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = proposed
+    if current:
+        chunks.append(current)
+
+    success = True
+    for chunk in chunks:
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": chunk,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        }
+        try:
+            response = requests.post(api_url, json=payload, timeout=30)
+            if response.status_code != 200:
+                log.warning(f"Telegram sending issue: {response.status_code} {response.text[:500]}")
+                success = False
+        except Exception as exc:
+            log.warning(f"Telegram sending exception: {repr(exc)}")
+            success = False
+        time.sleep(1)
+
+    return success
+
+
+def send_telegram_document(filename, text_content):
+    """Send a text string as a downloadable file to Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    files = {"document": (filename, text_content.encode("utf-8"))}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption": "📊 Raw fetched titles (pre-deduplication)",
+    }
+
+    try:
+        response = requests.post(api_url, data=payload, files=files, timeout=30)
+        if response.status_code != 200:
+            log.warning(f"Telegram document sending issue: {response.status_code} {response.text[:500]}")
+            return False
+        return True
+    except Exception as exc:
+        log.warning(f"Telegram document sending exception: {repr(exc)}")
+        return False
+
+
+def format_item_html(row, include_score=True):
+    title = html_escape(row["title"])
+    url = html_escape(row["url"])
+    source = html_escape(row["source"])
+    score = safe_float(row["relevance_score"], 0)
+    tech = html_escape(row["specific_tech"] or row["category"])
+    layer = html_escape(row["stack_layer"])
+    bottleneck = html_escape(row["bottleneck_addressed"])
+    why = html_escape(row["why_it_matters"])
+    thesis = html_escape(row["ai_stack_thesis"])
+    summary = html_escape(row["telegram_summary"])
+
+    lines = []
+    if include_score:
+        lines.append(f"<b>{score:.1f}/10</b> · {tech}")
+    else:
+        lines.append(f"<b>{tech}</b>")
+    lines.append(f'<a href="{url}">{title}</a>')
+    lines.append(f"Source: {source}")
+    if layer or bottleneck:
+        lines.append(f"Layer: {layer} · Bottleneck: {bottleneck}")
+    if summary:
+        lines.append(summary)
+    if why:
+        lines.append(f"Why it matters: {why}")
+    if thesis:
+        lines.append(f"Impact thesis: {thesis}")
+    return "\n".join(lines)
+
+
+def send_immediate_alerts(alert_items):
+    if not alert_items:
+        return []
+
+    items_to_send = alert_items[:MAX_ALERTS_PER_FLUSH]
+    blocks = ["🚨 <b>High-signal AI Stack &amp; Quantum alert</b>"]
+    for item in items_to_send:
+        blocks.append(format_item_html(item, include_score=True))
+
+    message = "\n\n".join(blocks)
+    if not send_telegram(message):
+        log.warning("Immediate alert send failed; leaving these items for the next digest.")
+        return []
+
+    log.info(f"Sent {len(items_to_send)} immediate alert items.")
+    return [item["url"] for item in items_to_send]
+
+
+def send_digest():
+    conn = connect_db()
+    cur = conn.cursor()
+    time_window = (utc_now() - dt.timedelta(hours=24)).isoformat()
+
+    cur.execute(
+        """
+        SELECT * FROM items
+        WHERE digest_sent = 0
+          AND relevance_score >= ?
+          AND created_at >= ?
+        ORDER BY relevance_score DESC, created_at DESC
+        LIMIT ?
+        """,
+        (LLM_MIN_SCORE, time_window, DIGEST_MAX_ITEMS),
+    )
+    rows = cur.fetchall()
+
+    if not rows:
+        if SEND_EMPTY_DIGEST:
+            send_telegram("🧠 <b>AI Stack &amp; Quantum digest</b>\nNo new relevant items passed the strict filter.")
+        else:
+            log.info("No new digest items.")
+        return 0
+
+    header = f"🧠 <b>AI Stack &amp; Quantum digest</b> · {len(rows)} new signal(s)"
+    blocks = [header]
+    for row in rows:
+        blocks.append(format_item_html(row, include_score=True))
+    message = "\n\n".join(blocks)
+
+    if not send_telegram(message):
+        log.warning("Digest send failed; items remain unsent.")
+        return 0
+
+    ids = [row["id"] for row in rows]
+    cur.executemany("UPDATE items SET digest_sent = 1 WHERE id = ?", [(item_id,) for item_id in ids])
+    conn.commit()
+    log.info(f"Sent {len(ids)} digest items.")
+    return len(ids)
+
+
+def send_raw_json_dump(raw_items):
+    """Send all raw fetched items as an uncleaned JSON file to Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    filename = f"raw_fetch_dump_{utc_now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    try:
+        json_content = json.dumps(raw_items, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        log.warning(f"Failed to serialize raw JSON dump: {repr(exc)}")
+        return False
+
+    files = {"document": (filename, json_content.encode("utf-8"), "application/json")}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption": f"📁 <b>Raw JSON Fetch Dump</b>\nTotal items: {len(raw_items)} (Pre-cleaning &amp; pre-slicing)",
+        "parse_mode": "HTML",
+    }
+
+    try:
+        response = requests.post(api_url, data=payload, files=files, timeout=45)
+        if response.status_code != 200:
+            log.warning(f"Telegram raw JSON sending issue: {response.status_code} {response.text[:500]}")
+            return False
+        log.info(f"Sent raw JSON dump ({len(raw_items)} items) to Telegram.")
+        return True
+    except Exception as exc:
+        log.warning(f"Telegram raw JSON sending exception: {repr(exc)}")
+        return False
+
+
+# =========================
+# Source Fetchers
+# =========================
+
+ARXIV_HEADERS = {
+    "User-Agent": "ai-software-stack-quantum-bot/1.0 (contact: your-email@example.com)"
+}
+
+
+def _fetch_arxiv_atom(url, max_retries=3, timeout=30):
+    """Direct fetch + parse of the arXiv Atom API preserving <category> tags for bucketing."""
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, headers=ARXIV_HEADERS, timeout=timeout)
+            resp.raise_for_status()
+            parsed = feedparser.parse(resp.content)
+            if parsed.bozo and not parsed.entries:
+                raise ValueError(f"feedparser bozo with no entries: {parsed.bozo_exception}")
+            return parsed.entries
+        except Exception as exc:
+            last_exc = exc
+            log.warning(f"arXiv fetch attempt {attempt + 1}/{max_retries} failed: {repr(exc)}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+    log.error(f"arXiv combined fetch failed after {max_retries} attempts: {repr(last_exc)}")
+    return []
+
+
+def _parse_arxiv_entry(entry, category):
+    return {
+        "title": clean_text(entry.get("title", "")),
+        "url": normalize_url(entry.get("link", "")),
+        "source": f"arXiv / {category}",
+        "source_type": "research",
+        "published_at": entry.get("published", entry.get("updated", utc_now().isoformat())),
+        "raw_summary": clean_text(entry.get("summary", ""))[:2200],
+        "categories": [t.get("term") for t in entry.get("tags", []) if t.get("term")],
+    }
+
+
+def fetch_arxiv():
+    """Fetch ARXIV_RESULTS_PER_CATEGORY items for each configured category
+    in a single combined API call, preserving cross-listed category buckets."""
+    items = []
+    if not ENABLE_ARXIV or not ARXIV_CATEGORIES:
+        return items
+
+    combined_query = "(" + " OR ".join(f"cat:{c}" for c in ARXIV_CATEGORIES) + ")"
+    max_results = min(1000, ARXIV_RESULTS_PER_CATEGORY * len(ARXIV_CATEGORIES) * 8)
+
+    params = {
+        "search_query": combined_query,
+        "start": 0,
+        "max_results": max_results,
+        "sortBy": "submittedDate",
+        "sortOrder": "descending",
+    }
+    url = "https://export.arxiv.org/api/query?" + urlencode(params)
+
+    raw_entries = _fetch_arxiv_atom(url)
+    if not raw_entries:
+        return items
+
+    buckets = {cat: [] for cat in ARXIV_CATEGORIES}
+    for entry in raw_entries:
+        entry_categories = [t.get("term") for t in entry.get("tags", []) if t.get("term")]
+        for cat in ARXIV_CATEGORIES:
+            if cat in entry_categories and len(buckets[cat]) < ARXIV_RESULTS_PER_CATEGORY:
+                buckets[cat].append(_parse_arxiv_entry(entry, cat))
+
+    for cat, bucketed in buckets.items():
+        if len(bucketed) < ARXIV_RESULTS_PER_CATEGORY:
+            log.warning(
+                f"arXiv / {cat}: only {len(bucketed)} of "
+                f"{ARXIV_RESULTS_PER_CATEGORY} requested items found in combined fetch"
+            )
+        items.extend(bucketed)
+
+    return items
+
+
+def _fetch_hn_item(session, story_id):
+    try:
+        response = session.get(
+            f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json",
+            headers=REQUEST_HEADERS,
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return None
+        hit = response.json() or {}
+        if hit.get("type") != "story":
+            return None
+
+        title = clean_text(hit.get("title", ""))
+        if not title:
+            return None
+
+        link = normalize_url(hit.get("url") or f"https://news.ycombinator.com/item?id={story_id}")
+        points = hit.get("score") or 0
+        comments = hit.get("descendants") or 0
+        created_at = dt.datetime.fromtimestamp(hit.get("time", time.time()), tz=dt.timezone.utc).isoformat()
+        text = clean_text(hit.get("text", ""))
+
+        return {
+            "title": title,
+            "url": link,
+            "source": "Hacker News / newest",
+            "source_type": "community",
+            "published_at": created_at,
+            "raw_summary": f"Newest Hacker News story. Points: {points}. Comments: {comments}. Text: {text[:1200]}",
+        }
+    except Exception as exc:
+        log.error(f"HN item {story_id} exception: {repr(exc)}")
+        return None
+
+
+def fetch_hackernews():
+    items = []
+    if not ENABLE_HACKERNEWS:
+        return items
+
+    try:
+        ids_response = requests.get(
+            "https://hacker-news.firebaseio.com/v0/newstories.json",
+            headers=REQUEST_HEADERS,
+            timeout=30,
+        )
+        if ids_response.status_code != 200:
+            log.warning(f"HN newest IDs failure: {ids_response.status_code} {ids_response.text[:300]}")
+            return items
+        story_ids = ids_response.json()[:HN_NEW_STORIES_PER_RUN]
+    except Exception as exc:
+        log.error(f"HN newest IDs exception: {repr(exc)}")
+        return items
+
+    last_seen_id = get_hn_high_water_mark()
+    fresh_ids = [sid for sid in story_ids if sid > last_seen_id] if last_seen_id else story_ids
+    skipped = len(story_ids) - len(fresh_ids)
+    if skipped:
+        log.info(f"HN: skipping {skipped} id(s) at or below high-water mark {last_seen_id}.")
+    if not fresh_ids:
+        return items
+
+    session = requests.Session()
+    workers = max(1, min(HN_FETCH_WORKERS, len(fresh_ids)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch_hn_item, session, sid) for sid in fresh_ids]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                items.append(result)
+
+    set_hn_high_water_mark(max(fresh_ids))
+    return items
+
+
+def fetch_techmeme():
+    if not ENABLE_TECHMEME:
+        return []
+    return fetch_standard_rss(
+        "https://www.techmeme.com/feed.xml",
+        source_label="Techmeme",
+        source_type="technology_news",
+        max_items=TECHMEME_MAX_ITEMS,
+    )
+
+
+def fetch_webpage_summary_snippet(session, url, timeout=6):
+    """Fetch OpenGraph/meta description snippet when an RSS entry body is a short stub."""
+    try:
+        resp = session.get(url, headers=REQUEST_HEADERS, timeout=timeout)
+        if resp.status_code != 200:
+            return ""
+        html_text = resp.text
+        og_match = re.search(
+            r'<meta\s+[^>]*property=[\'"]og:description[\'"][^>]*content=[\'"]([^\'"]+)[\'"]',
+            html_text,
+            re.IGNORECASE,
+        )
+        if og_match:
+            return clean_text(og_match.group(1))
+        desc_match = re.search(
+            r'<meta\s+[^>]*name=[\'"]description[\'"][^>]*content=[\'"]([^\'"]+)[\'"]',
+            html_text,
+            re.IGNORECASE,
+        )
+        if desc_match:
+            return clean_text(desc_match.group(1))
+    except Exception:
+        pass
+    return ""
+
+
+def fetch_standard_rss(feed_url, source_label=None, source_type="rss", max_items=25):
+    """Fetch an RSS/Atom feed with TLS fallback, conditional GET,
+    per-feed cooldown tracking, and a Wayback Machine fallback."""
+    if feed_should_skip_live(feed_url):
+        log.info(f"RSS feed on cooldown, skipping attempt: {source_label or feed_url}")
+        return []
+
+    items = []
+    max_items = max_items or 25
+    feed = None
+    raw_content = None
+    live_status = None
+    not_modified = False
+
+    request_headers = dict(REQUEST_HEADERS)
+    cached_headers = FEED_CACHE_HEADERS.get(feed_url) or {}
+    if cached_headers.get("etag"):
+        request_headers["If-None-Match"] = cached_headers["etag"]
+    if cached_headers.get("last_modified"):
+        request_headers["If-Modified-Since"] = cached_headers["last_modified"]
+
+    try:
+        response = fetch_rss_with_tls_fallback(feed_url, request_headers, timeout=35)
+        live_status = response.status_code
+        if response.status_code == 304:
+            not_modified = True
+        elif response.status_code == 200:
+            raw_content = response.content
+            if response.headers.get("ETag") or response.headers.get("Last-Modified"):
+                FEED_CACHE_HEADERS[feed_url] = {
+                    "etag": response.headers.get("ETag", cached_headers.get("etag")),
+                    "last_modified": response.headers.get("Last-Modified", cached_headers.get("last_modified")),
+                }
+        else:
+            log.info(f"RSS live fetch failed for {source_label or feed_url}: {response.status_code}")
+    except requests.exceptions.Timeout:
+        log.info(f"RSS timeout for {source_label or feed_url}.")
+    except Exception as exc:
+        log.info(f"RSS requests issue for {source_label or feed_url}: {repr(exc)}")
+
+    if not_modified:
+        feed_record_result(feed_url, success=True)
+        return items
+
+    if raw_content:
+        try:
+            feed = feedparser.parse(raw_content)
+        except Exception as exc:
+            log.info(f"RSS feedparser parsing issue for {feed_url}: {repr(exc)}")
+            feed = None
+
+    live_entries_ok = bool(feed and getattr(feed, "entries", None))
+    feed_record_result(feed_url, success=live_entries_ok)
+
+    if not live_entries_ok:
+        reason = (
+            "blocked/challenge page or malformed feed"
+            if raw_content is not None
+            else f"status {live_status or 'request failed'}"
+        )
+        log.info(f"RSS live path yielded no entries for {source_label or feed_url} ({reason}). Trying Wayback Machine...")
+        try:
+            wb_api_url = f"https://archive.org/wayback/available?url={feed_url}"
+            wb_resp = requests.get(wb_api_url, timeout=15)
+            if wb_resp.status_code == 200:
+                snapshots = wb_resp.json().get("archived_snapshots", {})
+                if "closest" in snapshots and snapshots["closest"].get("available"):
+                    snapshot_url = snapshots["closest"]["url"].replace("http://", "https://")
+                    snap_resp = requests.get(snapshot_url, headers=REQUEST_HEADERS, timeout=30)
+                    if snap_resp.status_code == 200:
+                        wb_feed = feedparser.parse(snap_resp.content)
+                        if getattr(wb_feed, "entries", None):
+                            feed = wb_feed
+        except Exception as wb_exc:
+            log.info(f"Wayback Machine RSS fallback failed for {feed_url}: {repr(wb_exc)}")
+
+    if not feed or not getattr(feed, "entries", None):
+        return items
+
+    source_name = source_label or (
+        clean_text(feed.feed.get("title", feed_url))
+        if getattr(feed, "feed", None)
+        else feed_url
+    )
+    for entry in getattr(feed, "entries", [])[:max_items]:
+        title = clean_text(entry.get("title", ""))
+        link = normalize_url(entry.get("link", ""))
+        summary = clean_text(entry.get("summary", entry.get("description", "")))
+
+        if not title or not link:
+            continue
+
+        items.append({
+            "title": title,
+            "url": link,
+            "source": f"RSS / {source_name}",
+            "source_type": source_type,
+            "published_at": entry.get("published", entry.get("updated", utc_now().isoformat())),
+            "raw_summary": summary[:2200],
+        })
+
+    return items
+
+
+def fetch_standard_rss_2(feed_url, source_label=None, source_type="custom_rss", max_items=None):
+    """Enriched RSS/Atom fetcher: extracts <content:encoded>, tags/categories,
+    author, and performs OpenGraph fallback for stub entries."""
+    if feed_should_skip_live(feed_url):
+        log.info(f"RSS feed on cooldown, skipping attempt: {source_label or feed_url}")
+        return []
+
+    items = []
+    max_items = max_items or 25
+    feed = None
+    raw_content = None
+    live_status = None
+    not_modified = False
+
+    request_headers = dict(REQUEST_HEADERS)
+    cached_headers = FEED_CACHE_HEADERS.get(feed_url) or {}
+    if cached_headers.get("etag"):
+        request_headers["If-None-Match"] = cached_headers["etag"]
+    if cached_headers.get("last_modified"):
+        request_headers["If-Modified-Since"] = cached_headers["last_modified"]
+
+    try:
+        response = fetch_rss_with_tls_fallback(feed_url, request_headers, timeout=35)
+        live_status = response.status_code
+        if response.status_code == 304:
+            not_modified = True
+        elif response.status_code == 200:
+            raw_content = response.content
+            if response.headers.get("ETag") or response.headers.get("Last-Modified"):
+                FEED_CACHE_HEADERS[feed_url] = {
+                    "etag": response.headers.get("ETag", cached_headers.get("etag")),
+                    "last_modified": response.headers.get("Last-Modified", cached_headers.get("last_modified")),
+                }
+        else:
+            log.info(f"RSS live fetch failed for {source_label or feed_url}: {response.status_code}")
+    except requests.exceptions.Timeout:
+        log.info(f"RSS timeout for {source_label or feed_url}.")
+    except Exception as exc:
+        log.info(f"RSS requests issue for {source_label or feed_url}: {repr(exc)}")
+
+    if not_modified:
+        feed_record_result(feed_url, success=True)
+        return items
+
+    if raw_content:
+        try:
+            feed = feedparser.parse(raw_content)
+        except Exception as exc:
+            log.info(f"RSS feedparser parsing issue for {feed_url}: {repr(exc)}")
+            feed = None
+
+    live_entries_ok = bool(feed and getattr(feed, "entries", None))
+    feed_record_result(feed_url, success=live_entries_ok)
+
+    if not live_entries_ok:
+        reason = (
+            "blocked/challenge page or malformed feed"
+            if raw_content is not None
+            else f"status {live_status or 'request failed'}"
+        )
+        log.info(f"RSS live path yielded no entries for {source_label or feed_url} ({reason}). Trying Wayback Machine...")
+        try:
+            wb_api_url = f"https://archive.org/wayback/available?url={feed_url}"
+            wb_resp = requests.get(wb_api_url, timeout=15)
+            if wb_resp.status_code == 200:
+                snapshots = wb_resp.json().get("archived_snapshots", {})
+                if "closest" in snapshots and snapshots["closest"].get("available"):
+                    snapshot_url = snapshots["closest"]["url"].replace("http://", "https://")
+                    snap_resp = requests.get(snapshot_url, headers=REQUEST_HEADERS, timeout=30)
+                    if snap_resp.status_code == 200:
+                        wb_feed = feedparser.parse(snap_resp.content)
+                        if getattr(wb_feed, "entries", None):
+                            feed = wb_feed
+        except Exception as wb_exc:
+            log.info(f"Wayback Machine RSS fallback failed for {feed_url}: {repr(wb_exc)}")
+
+    if not feed or not getattr(feed, "entries", None):
+        return items
+
+    source_name = source_label or (
+        clean_text(feed.feed.get("title", feed_url))
+        if getattr(feed, "feed", None)
+        else feed_url
+    )
+    session = requests.Session()
+
+    for entry in getattr(feed, "entries", [])[:max_items]:
+        title = clean_text(entry.get("title", ""))
+        link = normalize_url(entry.get("link", ""))
+        if not title or not link:
+            continue
+
+        body = ""
+        if "content" in entry and entry.content and isinstance(entry.content, list):
+            body = clean_text(entry.content[0].get("value", ""))
+        if not body:
+            body = clean_text(entry.get("summary", entry.get("description", "")))
+
+        tags = []
+        if "tags" in entry and entry.tags:
+            for t in entry.tags:
+                term = clean_text(t.get("term", ""))
+                if term and term not in tags:
+                    tags.append(term)
+
+        author = clean_text(entry.get("author", entry.get("dc_creator", "")))
+
+        if len(body) < 120 and link:
+            meta_snippet = fetch_webpage_summary_snippet(session, link, timeout=6)
+            if meta_snippet and len(meta_snippet) > len(body):
+                body = meta_snippet
+
+        summary_parts = []
+        if author:
+            summary_parts.append(f"Author: {author}.")
+        if tags:
+            summary_parts.append(f"Tags: {', '.join(tags[:6])}.")
+        if body:
+            summary_parts.append(body)
+
+        items.append({
+            "title": title,
+            "url": link,
+            "source": f"RSS / {source_name}",
+            "source_type": source_type,
+            "published_at": entry.get("published", entry.get("updated", utc_now().isoformat())),
+            "raw_summary": " ".join(summary_parts)[:2200],
+        })
+
+    return items
+
+
+def split_fallback_urls(url_value):
+    raw = str(url_value or "")
+    return [part.strip() for part in raw.split(";;") if part.strip()]
+
+
+def fetch_feed_specs(specs, source_type, max_items_per_feed):
+    items = []
+    for label, feed_url in specs:
+        total_for_label = 0
+        candidate_urls = split_fallback_urls(feed_url)
+        for candidate_url in candidate_urls:
+            try:
+                fetched = fetch_standard_rss(
+                    candidate_url,
+                    source_label=label,
+                    source_type=source_type,
+                    max_items=max_items_per_feed,
+                )
+                log.info(f"{source_type} feed: {len(fetched)} items from {label}")
+                items.extend(fetched)
+                total_for_label += len(fetched)
+                if fetched:
+                    break
+            except Exception as exc:
+                log.error(f"{source_type} issue for {label} / {candidate_url}: {repr(exc)}")
+            time.sleep(1)
+        if total_for_label == 0 and candidate_urls:
+            parsed_root = urlsplit(candidate_urls[0])
+            if parsed_root.scheme and parsed_root.netloc:
+                root_url = f"{parsed_root.scheme}://{parsed_root.netloc}/"
+                log.info(f"{source_type}: RSS yielded 0 items for {label}; falling back to HTML scraper on {root_url}")
+                scraped_fallback = scrape_single_html_target(label, root_url, max_items_per_feed)
+                items.extend(scraped_fallback)
+    return items
+
+
+def fetch_feed_specs_2(specs, source_type, max_items_per_feed):
+    items = []
+    for label, feed_url in specs:
+        total_for_label = 0
+        candidate_urls = split_fallback_urls(feed_url)
+        for candidate_url in candidate_urls:
+            try:
+                fetched = fetch_standard_rss_2(
+                    candidate_url,
+                    source_label=label,
+                    source_type=source_type,
+                    max_items=max_items_per_feed,
+                )
+                log.info(f"{source_type} feed: {len(fetched)} items from {label}")
+                items.extend(fetched)
+                total_for_label += len(fetched)
+                if fetched:
+                    break
+            except Exception as exc:
+                log.error(f"{source_type} issue for {label} / {candidate_url}: {repr(exc)}")
+            time.sleep(1)
+        if total_for_label == 0 and candidate_urls:
+            parsed_root = urlsplit(candidate_urls[0])
+            if parsed_root.scheme and parsed_root.netloc:
+                root_url = f"{parsed_root.scheme}://{parsed_root.netloc}/"
+                log.info(f"{source_type}: RSS yielded 0 items for {label}; falling back to HTML scraper on {root_url}")
+                scraped_fallback = scrape_single_html_target(label, root_url, max_items_per_feed)
+                items.extend(scraped_fallback)
+    return items
+
+
+def fetch_specialist_rss():
+    if not ENABLE_SPECIALIST_RSS:
+        return []
+    specs = get_feed_specs("SPECIALIST_RSS_FEEDS", DEFAULT_SPECIALIST_RSS_FEEDS)
+    return fetch_feed_specs_2(specs, "specialist_media", SPECIALIST_RSS_MAX_ITEMS_PER_FEED)
+
+
+def fetch_ecosystem_releases_rss():
+    if not ENABLE_ECOSYSTEM_RELEASES_RSS:
+        return []
+    specs = get_feed_specs("ECOSYSTEM_RELEASES_RSS_FEEDS", DEFAULT_ECOSYSTEM_RELEASES_RSS_FEEDS)
+    return fetch_feed_specs(specs, "ecosystem_release", ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED)
+
+
+def scrape_single_html_target(label, target, max_items=None):
+    """Dispatch to dedicated per-source scrapers or universal browser-impersonated scraper."""
+    return _scrape_single_html_target_impl(
+        label,
+        target,
+        max_items=max_items or HTML_SCRAPER_MAX_ITEMS_PER_SITE,
+        normalize_url_fn=normalize_url,
+    )
+
+
+def fetch_universal_html_scrapers():
+    if not ENABLE_HTML_SCRAPER:
+        return []
+    targets = get_feed_specs("HTML_SCRAPER_TARGETS", DEFAULT_HTML_SCRAPER_TARGETS)
+    all_scraped_items = []
+    for label, target in targets:
+        try:
+            site_items = scrape_single_html_target(label, target, HTML_SCRAPER_MAX_ITEMS_PER_SITE)
+            all_scraped_items.extend(site_items)
+        except Exception as exc:
+            log.error(f"html_scraper crash for '{label}': {repr(exc)}")
+        time.sleep(1)
+    return all_scraped_items
+
+
+def fetch_sec_edgar():
+    """Search SEC EDGAR filings via EFTS full-text search for AI software stack & quantum computing signals."""
+    items = []
+    if not ENABLE_SEC_EDGAR or not SEC_EFTS_QUERY:
+        return items
+
+    headers = {
+        "User-Agent": SEC_USER_AGENT,
+        "Accept": "application/json",
+    }
+    now_utc = utc_now()
+    start_dt = (now_utc - dt.timedelta(days=max(1, SEC_LOOKBACK_DAYS))).strftime("%Y-%m-%d")
+    end_dt = now_utc.strftime("%Y-%m-%d")
+    allowed_forms = {f.strip().upper() for f in SEC_FORMS if f.strip()}
+
+    params = {
+        "q": SEC_EFTS_QUERY,
+        "startdt": start_dt,
+        "enddt": end_dt,
+    }
+    if allowed_forms:
+        params["forms"] = ",".join(sorted(allowed_forms))
+
+    url = "https://efts.sec.gov/LATEST/search-index"
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=35)
+        if response.status_code != 200:
+            log.warning(f"SEC EFTS issue: {response.status_code} {response.text[:160]}")
+            return items
+
+        data = response.json() or {}
+        if "errorType" in data:
+            log.warning(f"SEC EFTS query error: {data.get('errorMessage', data.get('errorType'))}")
+            return items
+
+        hits = (data.get("hits") or {}).get("hits") or []
+        seen_accessions = set()
+
+        for hit in hits:
+            if len(items) >= SEC_MAX_ITEMS_PER_FETCH:
+                break
+
+            src = hit.get("_source") or {}
+            adsh = clean_text(src.get("adsh", ""))
+            if not adsh or adsh in seen_accessions:
+                continue
+
+            form = clean_text(src.get("form", "")).upper()
+            root_forms = [clean_text(rf).upper() for rf in (src.get("root_forms") or [])]
+            if allowed_forms and form not in allowed_forms and not any(rf in allowed_forms for rf in root_forms):
+                continue
+
+            ciks = src.get("ciks") or []
+            if not ciks:
+                continue
+            cik_int = str(int(re.sub(r"\D", "", str(ciks[0])) or 0))
+            adsh_nodash = adsh.replace("-", "")
+            hit_id = hit.get("_id", "")
+            filename = hit_id.split(":", 1)[1] if ":" in hit_id else ""
+
+            if filename:
+                filing_url = normalize_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{adsh_nodash}/{filename}")
+            else:
+                filing_url = normalize_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{adsh_nodash}/{adsh}-index.htm")
+
+            display_names = src.get("display_names") or []
+            company_label = clean_text(display_names[0]) if display_names else f"CIK {ciks[0]}"
+            file_date = clean_text(src.get("file_date", ""))
+            period_ending = clean_text(src.get("period_ending", ""))
+            file_desc = clean_text(src.get("file_description", "") or src.get("file_type", ""))
+            sics = [clean_text(s) for s in (src.get("sics") or []) if s]
+            form_items = [clean_text(it) for it in (src.get("items") or []) if it]
+
+            seen_accessions.add(adsh)
+
+            title_desc = f": {file_desc}" if file_desc and file_desc.upper() != form else ""
+            title = f"{company_label} - Form {form}{title_desc} ({file_date})"
+
+            summary_parts = [f"Filer: {company_label}", f"Form: {form}", f"Filed: {file_date}"]
+            if period_ending:
+                summary_parts.append(f"Period: {period_ending}")
+            if sics:
+                summary_parts.append(f"SIC: {', '.join(sics)}")
+            if form_items:
+                summary_parts.append(f"8-K Items: {', '.join(form_items)}")
+            if file_desc:
+                summary_parts.append(f"Document: {file_desc}")
+
+            items.append({
+                "title": title,
+                "url": filing_url,
+                "source": "SEC EDGAR / Full-Text Search",
+                "source_type": "sec_filing",
+                "published_at": f"{file_date}T00:00:00+00:00" if file_date else utc_now().isoformat(),
+                "raw_summary": " | ".join(summary_parts)[:2200],
+            })
+
+        log.info(f"sec_edgar: {len(items)} AI-stack/quantum filings matched via EFTS ({start_dt} to {end_dt})")
+    except Exception as exc:
+        log.error(f"SEC EDGAR EFTS exception: {repr(exc)}")
+
+    return items
+
+
+# =========================
+# OpenRouter LLM Classification
+# =========================
+
+
+def parse_llm_json(text):
+    if not text:
+        raise ValueError("Empty response text.")
+
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.replace("```json", "").replace("```", "").strip()
+
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            parsed = json.loads(text[start:end + 1])
+
+    if not isinstance(parsed, dict):
+        raise ValueError("OpenRouter response was not a JSON object.")
+    if "results" not in parsed or not isinstance(parsed["results"], list):
+        raise ValueError("OpenRouter response did not include a results list.")
+    return parsed
+
+
+def classify_batch(candidates):
+    if not OPENROUTER_API_KEY:
+        log.error(
+            "Missing OPENROUTER_API_KEY. Classification skipped; batch will be requeued "
+            "(capped by MAX_ITEM_RETRIES, currently %s)." % MAX_ITEM_RETRIES
+        )
+        return None
+
+    compact_items = []
+    for index, item in enumerate(candidates):
+        signals = match_stack_signals(item)
+        matched_layers = ", ".join(s["layer"] for s in signals)
+        matched_subs = "; ".join(sub for s in signals for sub in s["subtopics"])
+        compact_items.append(
+            {
+                "index": index,
+                "title": item.get("title", "")[:450],
+                "source": item.get("source", "")[:120],
+                "source_type": item.get("source_type", "")[:80],
+                "summary": item.get("raw_summary", "")[:2200],
+                "url": item.get("url", "")[:400],
+                "published_at": item.get("published_at", "")[:80],
+                "detected_stack_signals": f"{matched_layers} ({matched_subs})"[:350] if matched_subs else "",
+            }
+        )
+
+    system_prompt = """
+You are a strict AI Software Stack & Quantum Computing filter for a technical trend monitoring bot.
+Goal:
+Accept ONLY concrete technical developments, releases, benchmarks, papers, or infrastructure shifts that fall strictly within the following 9 topics (8 AI Software Stack layers + Quantum Computing). Treat all 9 topics with equal importance.
+
+Relevant ONLY when the item has concrete technical substance about at least one of these 9 domains:
+
+1. Data Engineering & Preprocessing:
+   - Data Wrangling & Pipeline Orchestration (Apache Spark, Ray Data, Polars, DuckDB): distributed ingestion, deduplication (MinHash LSH), heuristic/quality filtering, language ID via fastText, PII redaction, preventing GPU data starvation/under-utilization and data contamination.
+   - Tokenization Engines (Hugging Face Tokenizers, tiktoken, SentencePiece): Rust/C++ subword splitting (BPE, Unigram), vocabulary size (V), token-to-word fertility, compression rate, and sequence-length impact on quadratic attention cost.
+
+2. Deep Learning Frameworks & Distributed Training:
+   - Core Frameworks (PyTorch, JAX, TensorFlow): execution graphs, autograd, tensor abstractions, torch.compile (TorchDynamo, TorchInductor), automatic kernel fusion.
+   - Distributed Parallelism & Scaling Engines (DeepSpeed, Megatron-LM, FSDP / PyTorch Distributed, Ray Train): Tensor Parallelism (TP), Pipeline Parallelism (PP), Data Parallelism / ZeRO (Stages 1/2/3), reducing pipeline bubbles, communication bottlenecks, and backward-pass OOMs.
+   - Fine-Tuning & Alignment Libraries (Hugging Face TRL, Unsloth, Axolotl, PEFT): LoRA, QLoRA, SFT, RLHF, DPO, KTO, VRAM reduction and alignment engineering.
+
+3. Low-Level GPU Acceleration & Acceleration Kernels:
+   - Hardware Drivers & Compute Platforms (NVIDIA CUDA, AMD ROCm, Intel oneAPI): thread schedulers, device runtime, GPU memory buffers, SMs, driver regressions, kernel launch performance.
+   - Low-Level Math & Primitive Libraries (cuDNN, cuBLAS, CUTLASS): C++/Assembly GEMM, convolutions, activations, Hopper/Blackwell tensor core FLOPs efficiency.
+   - Inter-GPU Communication (NCCL, RCCL): AllReduce, AllGather, ReduceScatter across NVLink, NVSwitch, InfiniBand/RoCE; multi-node synchronization bottlenecks.
+   - Custom Fused Kernels (FlashAttention-2/3, vLLM PagedAttention, Triton): IO-aware fused GPU blocks minimizing HBM-SRAM transfers, cutting attention memory from O(N^2) to O(N) for 32k-1M+ context windows.
+
+4. Model Optimization & Quantization:
+   - Quantization Toolkits (AutoGPTQ, AutoAWQ, bitsandbytes, llama.cpp / GGML / GGUF): INT8, INT4, FP8, FP4, k-quants, Weight-Only or Weight-Activation quantization, shrinking checkpoints 50-75% while preserving perplexity/reasoning.
+   - Model Compilers & Engines (TensorRT-LLM, ONNX Runtime, TVM, OpenVINO): constant folding, operator fusion, graph compilation for datacenter GPUs/edge/NPUs delivering 2x-4x TTFT & throughput speedups.
+
+5. Serving & Inference Engines:
+   - High-Throughput Engines (vLLM, TGI, TensorRT-LLM, Triton Inference Server): dynamic/continuous batching (iteration-level scheduling), prefix caching, PagedAttention non-contiguous KV-cache allocation, QPS & concurrency scaling.
+   - Local & Edge Runtimes (Ollama, llama.cpp, ExLlamaV2, MLC-LLM): C++ runtimes on Metal/Apple Silicon, Vulkan, CPU AVX-512 for offline private inference.
+
+6. Application Orchestration, RAG & Middleware:
+   - Chaining & Agent Frameworks (LangChain, LangGraph, LlamaIndex, CrewAI): tool execution/function calling, multi-turn agent state machines, reducing serialization overhead and agentic drift.
+   - Vector Databases & Retrieval Engines (Milvus, Qdrant, Chroma, Pinecone, pgvector): embedding indexing, ANN/semantic retrieval latency impact on TTFT, recall quality & hallucination reduction.
+   - Guardrails & Structured Parsing (Outlines, Instructor, NeMo Guardrails, Guidance): grammar-constrained decoding (logit masking), JSON schema enforcement, prompt injection defense.
+
+7. API Gateway & Model Routing:
+   - Routing & Proxy Gateways (LiteLLM, Portkey, OpenResty / Envoy, Kong): centralized endpoint management, API key distribution, fallback cascading/failover, rate-limiting, cost tracking, DDoS protection.
+   - Backend Web Frameworks (FastAPI, gRPC, Uvicorn): async request dispatching, Server-Sent Events (SSE) token streaming transport, low transport latency.
+
+8. End-User Presentation & Interface (UX):
+   - User Interfaces & Prototyping UIs (Open WebUI, LibreChat, Next.js Chat Interfaces, Gradio, Streamlit): markdown/code/LaTeX rendering, smooth token-by-token SSE streaming, optimistic UI updates, graceful timeout/disconnect/context-limit error handling.
+
+9. Quantum Computing:
+   - Physical quantum processors (superconducting, trapped-ion, neutral-atom, photonic, silicon-spin, topological QPUs), fault-tolerant logical qubits, quantum error correction (QEC, surface codes, qLDPC), cryo-CMOS control, quantum interconnects, quantum software stacks/compilers (Qiskit, Cirq, PennyLane, CUDA-Q, Braket), and quantum advantage in chemistry, optimization, or cryptography.
+
+Strictly REJECT / mark irrelevant (score 0-4):
+- Pure physical datacenter/semiconductor manufacturing topics outside our 9 topics (e.g., liquid/immersion cooling, glass substrates, CoWoS packaging, EUV lithography, power busbars, robotics actuators, non-quantum silicon fab capacity).
+- Generic consumer AI app launches, chatbot drama, AI policy/regulation, copyright lawsuits, layoffs, stock price moves, generic company earnings, crypto/Web3, or marketing hype without concrete software-stack or quantum technical substance.
+- Purely theoretical ML papers with no systems, data pipeline, tokenization, distributed training, kernel, quantization, serving, RAG/guardrail, routing, UX, or quantum computing contribution.
+
+Scoring:
+0-3 = off-topic or outside the 9 allowed topics.
+4-6 = loosely mentions a tool or buzzword, but lacks concrete engineering substance, benchmarks, or architectural impact.
+7-8 = solid technical signal (release, optimization, architecture deep dive, benchmark, or paper) clearly addressing a bottleneck in one of the 9 topics.
+9-10 = major breakthrough, flagship release, step-change kernel/compiler/serving speedup, or landmark fault-tolerant quantum computing milestone.
+
+Strict rule:
+Set relevant=true ONLY when score >= 7 AND the item strictly maps to one of the 9 topics above.
+
+Return only valid JSON using this schema:
+{
+  "results": [
+    {
+      "index": 0,
+      "relevant": true,
+      "score": 8,
+      "category": "Short sub-category (e.g., Custom Fused Kernels, Quantization Toolkits, Vector Databases, Quantum Error Correction)",
+      "stack_layer": "1. Data Engineering & Preprocessing / 2. Deep Learning Frameworks & Distributed Training / 3. Low-Level GPU Acceleration & Acceleration Kernels / 4. Model Optimization & Quantization / 5. Serving & Inference Engines / 6. Application Orchestration, RAG & Middleware / 7. API Gateway & Model Routing / 8. End-User Presentation & Interface (UX) / 9. Quantum Computing",
+      "bottleneck_addressed": "data throughput / tokenization / distributed scaling / kernel IO / collective comms / quantization / compiler TTFT / serving concurrency / RAG recall / guardrails / gateway routing / streaming UX / quantum error correction / qubit scaling / other",
+      "specific_tech": "Short concrete technology name (e.g., FlashAttention-3, vLLM prefix caching, TorchInductor, GGUF k-quants, Qiskit QEC)",
+      "why_it_matters": "One or two factual sentences explaining the technical mechanism or benchmark improvement.",
+      "ai_stack_thesis": "One sentence on how this improves AI stack latency, throughput, memory efficiency, reliability, or quantum capability.",
+      "telegram_summary": "Short Telegram-ready summary."
+    }
+  ]
+}
+"""
+
+    user_prompt = {
+        "instruction": "Classify every item strictly against ONLY the 9 allowed topics. Reject off-topic hardware, hype, and fluff. Only output JSON.",
+        "items": compact_items,
+    }
+
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt.strip()},
+            {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+        ],
+        "temperature": 0.05,
+        "response_format": {"type": "json_object"},
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=90,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+                if DEBUG_LLM:
+                    log.debug(f"OpenRouter raw response:\n{text[:2500]}")
+
+                parsed = parse_llm_json(text)
+                return parsed.get("results", [])
+
+            if response.status_code in [429, 500, 502, 503, 504]:
+                wait_seconds = 10 * (attempt + 1)
+                log.warning(f"OpenRouter temporary error {response.status_code}. Retrying in {wait_seconds}s. {response.text[:500]}")
+                time.sleep(wait_seconds)
+                continue
+
+            log.error(f"OpenRouter error: {response.status_code} {response.text[:1000]}")
+            return None
+
+        except Exception as exc:
+            wait_seconds = 10 * (attempt + 1)
+            log.warning(f"OpenRouter exception: {repr(exc)}. Retrying in {wait_seconds}s.")
+            time.sleep(wait_seconds)
+
+    return None
+
+
+def classify_and_insert(candidates):
+    inserted_count = 0
+    processed_count = 0
+    failed_items = []
+    new_alerts = []
+
+    batches = list(chunk_list(candidates, LLM_BATCH_SIZE))
+    total_batches = len(batches)
+
+    for i, batch in enumerate(batches, 1):
+        log.info(f"Processing batch {i}/{total_batches} with OpenRouter ({len(batch)} items)...")
+        results = classify_batch(batch)
+        if results is None:
+            failed_items.extend(batch)
+            continue
+
+        result_by_index = {}
+        for result in results:
+            try:
+                index = int(result.get("index"))
+            except Exception:
+                continue
+            if 0 <= index < len(batch):
+                result_by_index[index] = result
+
+        for index, original in enumerate(batch):
+            result = result_by_index.get(index)
+
+            if result is None:
+                mark_url_processed(original, "rejected")
+                processed_count += 1
+                continue
+
+            score = safe_float(result.get("score", 0))
+            relevant = safe_bool(result.get("relevant"))
+            processed_count += 1
+
+            if not relevant or score < LLM_MIN_SCORE:
+                mark_url_processed(original, "rejected")
+                continue
+
+            cap = LLM_TEXT_FIELD_MAX_CHARS
+            enrich_item_with_stack_signals(original)
+            resolved_layer = clean_text(result.get("stack_layer", "")) or original.get("stack_layer_hint", "")
+            resolved_bottleneck = clean_text(result.get("bottleneck_addressed", "")) or original.get("bottleneck_hint", "")
+
+            item = {
+                **original,
+                "category": clean_text(result.get("category", ""))[:cap],
+                "stack_layer": resolved_layer[:cap],
+                "bottleneck_addressed": resolved_bottleneck[:cap],
+                "specific_tech": clean_text(result.get("specific_tech", ""))[:cap],
+                "relevance_score": score,
+                "why_it_matters": clean_text(result.get("why_it_matters", ""))[:cap],
+                "ai_stack_thesis": clean_text(result.get("ai_stack_thesis", ""))[:cap],
+                "telegram_summary": clean_text(result.get("telegram_summary", ""))[:cap],
+                "raw_llm_json": json.dumps(result, ensure_ascii=False),
+            }
+
+            is_alert = score >= ALERT_THRESHOLD
+
+            if insert_item(item, sent_alert=0, digest_sent=0):
+                inserted_count += 1
+                if is_alert:
+                    new_alerts.append(item)
+
+            mark_url_processed(original, "accepted")
+
+        time.sleep(2)
+
+    if new_alerts:
+        new_alerts.sort(key=lambda x: safe_float(x.get("relevance_score", 0)), reverse=True)
+        sent_urls = send_immediate_alerts(new_alerts)
+        if sent_urls:
+            conn = connect_db()
+            cur = conn.cursor()
+            digest_flag = 0 if INCLUDE_ALERTS_IN_DIGEST else 1
+            cur.executemany(
+                "UPDATE items SET sent_alert = 1, digest_sent = ? WHERE url = ?",
+                [(digest_flag, url) for url in sent_urls],
+            )
+            conn.commit()
+        skipped = len(new_alerts) - len(sent_urls)
+        if skipped > 0:
+            log.info(f"{skipped} alert-tier item(s) not sent as immediate alerts this flush; they remain eligible for the next digest.")
+
+    return {
+        "inserted": inserted_count,
+        "processed": processed_count,
+        "failed_items": failed_items,
+    }
+
+
+# =========================
+# Source Aggregation
+# =========================
+
+
+def fetch_all_sources() -> list:
+    """Run every enabled fetcher and return capped items as a flat list."""
+    fetchers = [
+        ("arxiv", fetch_arxiv),
+        ("hackernews", fetch_hackernews),
+        ("techmeme", fetch_techmeme),
+        ("specialist_rss", fetch_specialist_rss),
+        ("ecosystem_releases_rss", fetch_ecosystem_releases_rss),
+        ("html_scraper", fetch_universal_html_scrapers),
+        ("sec_edgar", fetch_sec_edgar),
+    ]
+    all_items = []
+    for name, fetcher in fetchers:
+        try:
+            items = fetcher()
+            log.info(f"fetch_{name}: {len(items)} items")
+            all_items.extend(items)
+        except Exception as exc:
+            log.error(f"fetch_{name} crash: {repr(exc)}")
+
+    if SEND_RAW_FETCH_JSON and all_items:
+        send_raw_json_dump(all_items)
+
+    capped = fair_cap_items(all_items, MAX_CANDIDATES_PER_RUN)
+    if len(capped) < len(all_items):
+        log.info(f"Global cap applied: {len(capped)}/{len(all_items)} items kept this run.")
+    return capped
+
+
+# =========================
+# Runtime — Two-Phase Queue Pipeline
+# =========================
+
+
+def touch_healthcheck():
+    try:
+        directory = os.path.dirname(HEALTHCHECK_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(HEALTHCHECK_FILE, "w") as fh:
+            fh.write(utc_now().isoformat())
+    except Exception as exc:
+        log.warning(f"Could not write healthcheck file {HEALTHCHECK_FILE}: {repr(exc)}")
+
+
+def fetch_and_enqueue():
+    ts = utc_now().strftime("%H:%M:%S")
+    log.info(f"[{ts}] Fetching all sources...")
+    raw_items = fetch_all_sources()
+
+    if SEND_RAW_FETCH_REPORT and raw_items:
+        grouped_titles = defaultdict(list)
+        for item in raw_items:
+            source = item.get("source", "Unknown Source")
+            title = clean_text(item.get("title", "No Title"))
+            grouped_titles[source].append(title)
+
+        report_lines = [f"Raw Fetch Report - {utc_now().strftime('%Y-%m-%d %H:%M:%S UTC')}"]
+        report_lines.append(f"Total items fetched (pre-deduping): {len(raw_items)}")
+        report_lines.append("=" * 60)
+
+        for source, titles in sorted(grouped_titles.items()):
+            report_lines.append(f"\n[{source}] ({len(titles)} items):")
+            for title in titles:
+                report_lines.append(f"  - {title}")
+
+        report_content = "\n".join(report_lines)
+        filename = f"raw_fetch_{utc_now().strftime('%Y%m%d_%H%M%S')}.txt"
+        send_telegram_document(filename, report_content)
+
+    new_items = []
+    for item in raw_items:
+        url = normalize_url(item.get("url", ""))
+        if not url:
+            continue
+        item["url"] = url
+        enrich_item_with_stack_signals(item)
+        fp = item_fingerprint(item)
+        item["content_fingerprint"] = fp
+
+        if url in SEEN_URLS_CACHE or fp in SEEN_FINGERPRINTS_CACHE:
+            continue
+        if processed_url_exists(url) or processed_fingerprint_exists(fp):
+            continue
+        new_items.append((url, fp, item))
+
+    added = 0
+    dropped = 0
+    with _queue_lock:
+        for url, fp, item in new_items:
+            if url in SEEN_URLS_CACHE or fp in SEEN_FINGERPRINTS_CACHE:
+                continue
+            if len(CANDIDATE_QUEUE) >= CANDIDATE_QUEUE_MAX:
+                dropped += 1
+                continue
+
+            SEEN_URLS_CACHE[url] = True
+            if fp:
+                SEEN_FINGERPRINTS_CACHE[fp] = True
+            CANDIDATE_QUEUE.append(item)
+            added += 1
+
+        if len(SEEN_URLS_CACHE) > 20_000:
+            oldest_urls = list(SEEN_URLS_CACHE.keys())[:10000]
+            for old_url in oldest_urls:
+                del SEEN_URLS_CACHE[old_url]
+
+            oldest_fps = list(SEEN_FINGERPRINTS_CACHE.keys())[:10000]
+            for old_fp in oldest_fps:
+                del SEEN_FINGERPRINTS_CACHE[old_fp]
+
+            for q_item in CANDIDATE_QUEUE:
+                q_url = q_item.get("url", "")
+                q_fp = q_item.get("content_fingerprint", "")
+                if q_url:
+                    SEEN_URLS_CACHE[q_url] = True
+                if q_fp:
+                    SEEN_FINGERPRINTS_CACHE[q_fp] = True
+
+        depth = len(CANDIDATE_QUEUE)
+
+    if dropped:
+        log.warning(f"[{ts}] Queue full. Dropped {dropped} overflow item(s). Increase CANDIDATE_QUEUE_MAX if needed.")
+    log.info(f"[{ts}] +{added} new items queued. Depth: {depth}")
+    touch_healthcheck()
+
+
+def requeue_failed_items(items, max_retries=None):
+    if not items:
+        return 0
+    max_retries = MAX_ITEM_RETRIES if max_retries is None else max_retries
+
+    added = 0
+    permanently_dropped = []
+    with _queue_lock:
+        for item in items:
+            item["_retry_count"] = item.get("_retry_count", 0) + 1
+            if item["_retry_count"] > max_retries:
+                permanently_dropped.append(item)
+                continue
+            if len(CANDIDATE_QUEUE) >= CANDIDATE_QUEUE_MAX:
+                break
+            CANDIDATE_QUEUE.append(item)
+            added += 1
+
+    for item in permanently_dropped:
+        mark_url_processed(item, "failed_permanent")
+    if permanently_dropped:
+        log.error(f"Dropped {len(permanently_dropped)} item(s) after exceeding {max_retries} retries.")
+
+    return added
+
+
+def flush_queue():
+    global _last_flush_time
+
+    with _queue_lock:
+        if not CANDIDATE_QUEUE:
+            _last_flush_time = utc_now()
+            return
+        process_count = min(len(CANDIDATE_QUEUE), MAX_CANDIDATES_PER_FLUSH)
+        batch = CANDIDATE_QUEUE[:process_count]
+        del CANDIDATE_QUEUE[:process_count]
+        remaining = len(CANDIDATE_QUEUE)
+
+    ts = utc_now().strftime("%H:%M:%S")
+    log.info(f"[{ts}] Flushing {len(batch)} item(s) through OpenRouter. Remaining queued: {remaining}")
+
+    result = classify_and_insert(batch)
+
+    failed_items = result.get("failed_items", [])
+    if failed_items:
+        requeued = requeue_failed_items(failed_items)
+        log.warning(f"Requeued {requeued}/{len(failed_items)} failed item(s) for later retry.")
+
+    inserted = result.get("inserted", 0)
+    processed = result.get("processed", 0)
+    log.info(f"OpenRouter processed {processed} item(s); inserted {inserted} relevant item(s).")
+
+    _last_flush_time = utc_now()
+    touch_healthcheck()
+
+
+def drain_queue(max_flushes=None):
+    if max_flushes is None:
+        max_flushes = (CANDIDATE_QUEUE_MAX // max(1, MAX_CANDIDATES_PER_FLUSH)) + 2
+    flush_count = 0
+    while True:
+        with _queue_lock:
+            if not CANDIDATE_QUEUE:
+                break
+        if flush_count >= max_flushes:
+            log.warning(f"[{utc_now().strftime('%H:%M:%S')}] Max flush cycles reached this call. Remaining items wait for the next flush check.")
+            break
+        flush_queue()
+        flush_count += 1
+
+
+def run_pipeline():
+    fetch_and_enqueue()
+    drain_queue()
+
+
+def maybe_flush():
+    with _queue_lock:
+        depth = len(CANDIDATE_QUEUE)
+        stale = depth > 0 and (utc_now() - _last_flush_time) >= dt.timedelta(minutes=FORCE_FLUSH_MINUTES)
+
+    if depth == 0:
+        return
+    if depth >= QUEUE_FLUSH_LIMIT or stale:
+        reason = "queue depth" if depth >= QUEUE_FLUSH_LIMIT else "force-flush timeout"
+        log.info(f"maybe_flush triggered ({reason}); depth={depth}")
+        drain_queue()
+
+
+def log_flush_heartbeat():
+    with _queue_lock:
+        depth = len(CANDIDATE_QUEUE)
+        last_flush = _last_flush_time.strftime("%Y-%m-%d %H:%M:%S UTC") if _last_flush_time else "Never"
+
+    log.info(
+        f"⏱️ [FLUSH HEARTBEAT] Background flush monitor is active and healthy. "
+        f"Current queue depth: {depth}/{CANDIDATE_QUEUE_MAX} | Last flush: {last_flush}"
+    )
+
+
+def print_config():
+    log.info("Configuration:")
+    log.info(f"DB_PATH: {DB_PATH}")
+    log.info(f"OPENROUTER_MODEL: {OPENROUTER_MODEL}")
+    log.info(f"FETCH_MINUTES: {FETCH_MINUTES} (fetch and flush run on independent timers)")
+    log.info(f"MAX_CANDIDATES_PER_RUN: {MAX_CANDIDATES_PER_RUN}")
+    log.info(f"MAX_CANDIDATES_PER_FLUSH: {MAX_CANDIDATES_PER_FLUSH}")
+    log.info(f"CANDIDATE_QUEUE_MAX: {CANDIDATE_QUEUE_MAX}")
+    log.info(f"QUEUE_FLUSH_LIMIT: {QUEUE_FLUSH_LIMIT}")
+    log.info(f"CHECK_QUEUE_SECONDS: {CHECK_QUEUE_SECONDS}")
+    log.info(f"FORCE_FLUSH_MINUTES: {FORCE_FLUSH_MINUTES}")
+    log.info(f"MAX_ITEM_RETRIES: {MAX_ITEM_RETRIES}")
+    log.info(f"DIGEST_MINUTES: {DIGEST_MINUTES}")
+    log.info(f"LLM_BATCH_SIZE: {LLM_BATCH_SIZE}")
+    log.info(f"LLM_MIN_SCORE: {LLM_MIN_SCORE}")
+    log.info(f"ALERT_THRESHOLD: {ALERT_THRESHOLD}")
+    log.info(f"MAX_ALERTS_PER_FLUSH: {MAX_ALERTS_PER_FLUSH}")
+    log.info(f"DIGEST_MAX_ITEMS: {DIGEST_MAX_ITEMS}")
+    log.info(f"ENABLE_ARXIV: {ENABLE_ARXIV} categories: {ARXIV_CATEGORIES} per category: {ARXIV_RESULTS_PER_CATEGORY}")
+    log.info(f"ENABLE_HACKERNEWS: {ENABLE_HACKERNEWS} HN_NEW_STORIES_PER_RUN: {HN_NEW_STORIES_PER_RUN} workers: {HN_FETCH_WORKERS} high_water_mark: {get_hn_high_water_mark()}")
+    log.info(f"ENABLE_TECHMEME: {ENABLE_TECHMEME} TECHMEME_MAX_ITEMS: {TECHMEME_MAX_ITEMS}")
+    log.info(f"ENABLE_SPECIALIST_RSS: {ENABLE_SPECIALIST_RSS} feeds: {len(get_feed_specs('SPECIALIST_RSS_FEEDS', DEFAULT_SPECIALIST_RSS_FEEDS))} per feed: {SPECIALIST_RSS_MAX_ITEMS_PER_FEED}")
+    log.info(f"ENABLE_ECOSYSTEM_RELEASES_RSS: {ENABLE_ECOSYSTEM_RELEASES_RSS} feeds: {len(get_feed_specs('ECOSYSTEM_RELEASES_RSS_FEEDS', DEFAULT_ECOSYSTEM_RELEASES_RSS_FEEDS))} per feed: {ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED}")
+    log.info(f"ENABLE_HTML_SCRAPER: {ENABLE_HTML_SCRAPER} targets: {len(get_feed_specs('HTML_SCRAPER_TARGETS', DEFAULT_HTML_SCRAPER_TARGETS))} per site: {HTML_SCRAPER_MAX_ITEMS_PER_SITE}")
+    log.info(f"ENABLE_SEC_EDGAR: {ENABLE_SEC_EDGAR} forms: {SEC_FORMS} lookback_days: {SEC_LOOKBACK_DAYS} max_items: {SEC_MAX_ITEMS_PER_FETCH}")
+    log.info(f"Tracked domains: {len(STACK_DOMAIN_TAXONOMY)} (8 AI Software Stack layers + Quantum Computing)")
+    log.info(f"Telegram token found: {bool(TELEGRAM_BOT_TOKEN)}")
+    log.info(f"Telegram chat found: {bool(TELEGRAM_CHAT_ID)}")
+    log.info(f"OpenRouter key found: {bool(OPENROUTER_API_KEY)}")
+
+
+def main():
+    init_db()
+    print_config()
+
+    if SEND_STARTUP_MESSAGE:
+        send_telegram(
+            f"✅ AI Software Stack &amp; Quantum Computing monitor started.\n"
+            f"Fetch every {FETCH_MINUTES} min, flush check every {CHECK_QUEUE_SECONDS}s "
+            f"(queue ≥{QUEUE_FLUSH_LIMIT} or {FORCE_FLUSH_MINUTES} min stale triggers a flush)."
+        )
+
+    run_pipeline()
+    send_digest()
+
+    scheduler = BackgroundScheduler(timezone="UTC")
+
+    scheduler.add_job(
+        fetch_and_enqueue,
+        "interval",
+        minutes=FETCH_MINUTES,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        maybe_flush,
+        "interval",
+        seconds=CHECK_QUEUE_SECONDS,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        send_digest,
+        "interval",
+        minutes=DIGEST_MINUTES,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        log_flush_heartbeat,
+        "interval",
+        hours=1,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    class SilentExecutorsFilter(logging.Filter):
+        def filter(self, record):
+            msg = record.getMessage()
+            if "maybe_flush" in msg and ("Running job" in msg or "executed successfully" in msg):
+                return False
+            return True
+
+    logging.root.addFilter(SilentExecutorsFilter())
+    for handler in logging.root.handlers:
+        handler.addFilter(SilentExecutorsFilter())
+
+    for name in ["apscheduler", "apscheduler.scheduler", "apscheduler.executors.default", "apscheduler.executors.pool"]:
+        exec_log = logging.getLogger(name)
+        exec_log.setLevel(logging.WARNING)
+        exec_log.propagate = False
+        exec_log.addFilter(SilentExecutorsFilter())
+
+    scheduler.start()
+    log.info("Scheduler active. Main thread blocking.")
+
+    try:
+        while True:
+            time.sleep(60)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+        log.info("Scheduler stopped.")
+
+
+if __name__ == "__main__":
+    main()

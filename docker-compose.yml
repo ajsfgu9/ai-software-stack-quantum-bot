@@ -1,0 +1,42 @@
+services:
+  ai-software-stack-quantum-bot:
+    build: .
+    image: ai-software-stack-quantum-bot:latest
+    container_name: ai-software-stack-quantum-bot
+    restart: unless-stopped
+
+    env_file:
+      - .env               # keep real secrets out of the compose file itself
+
+    volumes:
+      - bot-data:/app/data # SQLite DB + heartbeat file survive rebuilds/restarts
+
+    # --- Isolation hardening ---
+    read_only: true         # container FS is read-only except explicit mounts below
+    tmpfs:
+      - /tmp                # scratch space for anything that wants to write a temp file
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL                 # outbound-only worker; needs no Linux capabilities
+
+    # No ports are published — outbound-only worker (RSS/arXiv/GitHub/SEC
+    # fetches out, Telegram/OpenRouter calls out).
+
+    # --- Resource ceiling so a runaway loop can't take the whole VPS down ---
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 100
+
+    # --- Log rotation so container logs don't fill the disk ---
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
