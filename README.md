@@ -15,9 +15,10 @@ A hardened, two-phase trend-monitoring, LLM-filtering, SQLite-archiving, and Tel
 
 2. **Two-Phase Decoupled Queue Runtime (`APScheduler`)**
    - **Fetch phase (`fetch_and_enqueue`)**: Runs every `FETCH_MINUTES` (default `2m`), balances sources via `fair_cap_items()` (`MAX_CANDIDATES_PER_RUN=1000`, pure round-robin across sources), strips tracking URL params, hashes SHA-256 title fingerprints, deduplicates against bounded in-memory caches and SQLite (`processed_urls`, `processed_fingerprints`), and pushes new candidates into `CANDIDATE_QUEUE` (`CANDIDATE_QUEUE_MAX=480`).
-   - **Flush phase (`maybe_flush` -> `drain_queue` -> `flush_queue`)**: Checked every `CHECK_QUEUE_SECONDS` (default `1s`). Flushes immediately when queue depth reaches `QUEUE_FLUSH_LIMIT` (default `1`) or after `FORCE_FLUSH_MINUTES` (default `30m`) of staleness. Failed OpenRouter batches are automatically requeued up to `MAX_ITEM_RETRIES` (default `5`).
+   - **Flush phase (`maybe_flush` -> `drain_queue` -> `flush_queue`)**: Checked every `CHECK_QUEUE_SECONDS` (default `1s`). Flushes immediately when queue depth reaches `QUEUE_FLUSH_LIMIT` (default `1`) or after `FORCE_FLUSH_MINUTES` (default `30m`) of staleness. Failed LLM batches are automatically requeued up to `MAX_ITEM_RETRIES` (default `5`).
 
-3. **Strict OpenRouter LLM Classifier & SQLite WAL Store**
+3. **Strict Dual-Provider LLM Classifier (OpenRouter + Official Gemini API) & SQLite WAL Store**
+   - Supports both **OpenRouter** (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL`) and Google's **Official Gemini API** (`GEMINI_API_KEY`, `GEMINI_MODEL` via `generativelanguage.googleapis.com`). Set `LLM_PROVIDER=openrouter` (default) or `LLM_PROVIDER=gemini`, and optionally set `LLM_FALLBACK_PROVIDER` for automatic failover.
    - Evaluates items in batches (`LLM_BATCH_SIZE=12`, `temperature=0.05`, JSON mode) strictly against the 10 AI Models & Software Stack layers, rejecting physical hardware/cooling/packaging (`ai-hardware-bot`), Quantum QPUs (`ai-hardware-bot`), non-AI hard sciences (`frontier-deeptech-bot`), and generic consumer/marketing fluff.
    - Persists accepted signals (`score >= 7.0`) into `ai_stack_quantum_trends.db` (SQLite WAL mode) with structured fields: `stack_layer`, `bottleneck_addressed`, `specific_tech`, `relevance_score`, `why_it_matters`, `ai_stack_thesis`, `telegram_summary`, and `raw_llm_json`.
 
@@ -50,7 +51,7 @@ A hardened, two-phase trend-monitoring, LLM-filtering, SQLite-archiving, and Tel
 git clone https://github.com/ajsfgu9/ai-software-stack-quantum-bot.git
 cd ai-software-stack-quantum-bot
 cp .env.example .env
-# Edit .env and set OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN, and TELEGRAM_CHAT_ID
+# Edit .env and set LLM_PROVIDER (openrouter or gemini), OPENROUTER_API_KEY / GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, and TELEGRAM_CHAT_ID
 docker compose up -d --build
 docker compose logs -f
 ```
