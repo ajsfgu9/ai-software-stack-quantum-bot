@@ -101,7 +101,7 @@ def get_feed_specs(name, default_specs=None):
 # Configuration
 # =========================
 
-DB_PATH = os.getenv("DB_PATH", "/app/data/ai_stack_trends.db").strip()
+DB_PATH = os.getenv("DB_PATH", "/app/data/ai_stack_quantum_trends.db").strip()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -109,27 +109,27 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash").strip()
 
-FETCH_MINUTES = get_int("FETCH_MINUTES", 10)
-DIGEST_MINUTES = get_int("DIGEST_MINUTES", 360)
+FETCH_MINUTES = get_int("FETCH_MINUTES", 2)
+DIGEST_MINUTES = get_int("DIGEST_MINUTES", 60)
 
-MAX_CANDIDATES_PER_RUN = get_int("MAX_CANDIDATES_PER_RUN", 180)
+MAX_CANDIDATES_PER_RUN = get_int("MAX_CANDIDATES_PER_RUN", 1000)
 MAX_CANDIDATES_PER_FLUSH = get_int("MAX_CANDIDATES_PER_FLUSH", 96)
-CANDIDATE_QUEUE_MAX = get_int("CANDIDATE_QUEUE_MAX", 360)
+CANDIDATE_QUEUE_MAX = get_int("CANDIDATE_QUEUE_MAX", 480)
 
-LLM_BATCH_SIZE = max(1, get_int("LLM_BATCH_SIZE", 8))
+LLM_BATCH_SIZE = max(1, get_int("LLM_BATCH_SIZE", 12))
 LLM_MIN_SCORE = get_float("LLM_MIN_SCORE", 7.0)
-ALERT_THRESHOLD = get_float("ALERT_THRESHOLD", 8.5)
+ALERT_THRESHOLD = get_float("ALERT_THRESHOLD", 7.5)
 
 ARXIV_RESULTS_PER_CATEGORY = get_int("ARXIV_RESULTS_PER_CATEGORY", 20)
 HN_STORIES_PER_RUN = get_int(
     "HN_STORIES_PER_RUN",
-    get_int("HN_NEW_STORIES_PER_RUN", 60),
+    get_int("HN_NEW_STORIES_PER_RUN", 80),
 )
 HN_MIN_SCORE = get_int("HN_MIN_SCORE", 15)
 TECHMEME_MAX_ITEMS = get_int("TECHMEME_MAX_ITEMS", 40)
 
 MAX_ALERTS_PER_FLUSH = get_int("MAX_ALERTS_PER_FLUSH", 8)
-DIGEST_MAX_ITEMS = get_int("DIGEST_MAX_ITEMS", 10)
+DIGEST_MAX_ITEMS = get_int("DIGEST_MAX_ITEMS", 5)
 SEND_EMPTY_DIGEST = get_bool("SEND_EMPTY_DIGEST", False)
 INCLUDE_ALERTS_IN_DIGEST = get_bool("INCLUDE_ALERTS_IN_DIGEST", False)
 SEND_RAW_FETCH_REPORT = get_bool("SEND_RAW_FETCH_REPORT", False)
@@ -142,8 +142,8 @@ ENABLE_TECHMEME = get_bool("ENABLE_TECHMEME", True)
 DEBUG_LLM = get_bool("DEBUG_LLM", False)
 SEND_STARTUP_MESSAGE = get_bool("SEND_STARTUP_MESSAGE", True)
 
-QUEUE_FLUSH_LIMIT = get_int("QUEUE_FLUSH_LIMIT", 32)
-CHECK_QUEUE_SECONDS = get_int("CHECK_QUEUE_SECONDS", 60)
+QUEUE_FLUSH_LIMIT = get_int("QUEUE_FLUSH_LIMIT", 1)
+CHECK_QUEUE_SECONDS = get_int("CHECK_QUEUE_SECONDS", 1)
 FORCE_FLUSH_MINUTES = get_int("FORCE_FLUSH_MINUTES", 30)
 
 MAX_ITEM_RETRIES = get_int("MAX_ITEM_RETRIES", 5)
@@ -181,7 +181,7 @@ DEFAULT_SPECIALIST_RSS_FEEDS = [
 
 # Step 2: Core OSS ecosystem release feeds (GitHub Atom — curated releases only, no raw commit firehose)
 ENABLE_ECOSYSTEM_RELEASES_RSS = get_bool("ENABLE_ECOSYSTEM_RELEASES_RSS", True)
-ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED = get_int("ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED", 8)
+ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED = get_int("ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED", 12)
 DEFAULT_ECOSYSTEM_RELEASES_RSS_FEEDS = [
     ("vLLM Releases", "https://github.com/vllm-project/vllm/releases.atom"),
     ("SGLang Releases", "https://github.com/sgl-project/sglang/releases.atom"),
@@ -1163,7 +1163,7 @@ def fetch_arxiv():
         return items
 
     combined_query = "(" + " OR ".join(f"cat:{c}" for c in ARXIV_CATEGORIES) + ")"
-    max_results = min(1000, ARXIV_RESULTS_PER_CATEGORY * len(ARXIV_CATEGORIES) * 6)
+    max_results = min(1000, ARXIV_RESULTS_PER_CATEGORY * len(ARXIV_CATEGORIES) * 8)
 
     params = {
         "search_query": combined_query,
@@ -2297,7 +2297,7 @@ def log_flush_heartbeat():
         last_flush = _last_flush_time.strftime("%Y-%m-%d %H:%M:%S UTC") if _last_flush_time else "Never"
 
     log.info(
-        f"⏱️ [FLUSH HEARTBEAT] Background flush monitor is active and healthy. "
+        f"⏱️ [FLUSH HEARTBEAT] {CHECK_QUEUE_SECONDS}-second background check is active and healthy. "
         f"Current queue depth: {depth}/{CANDIDATE_QUEUE_MAX} | Last flush: {last_flush}"
     )
 

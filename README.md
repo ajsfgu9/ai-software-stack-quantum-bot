@@ -6,7 +6,7 @@ A hardened, two-phase trend-monitoring, LLM-filtering, SQLite-archiving, and Tel
 
 1. **Multi-Source Ingestion (`app.py` + `scrapers.py`)**
    - **arXiv Atom API**: Single combined query across `cs.AI, cs.LG, cs.CL, cs.CV, cs.MA, cs.DC, cs.PL, cs.DB, cs.SE, cs.IR, cs.HC` preserving `<category>` tags for cross-list-aware per-category bucketing.
-   - **Hacker News (Signal-Filtered)**: Polls `/v0/topstories.json` + `/v0/beststories.json` via `ThreadPoolExecutor` and keeps only stories meeting `HN_MIN_SCORE` (default `15`), eliminating 1-point `newstories` spam while allowing rising stories to enter once they gain traction.
+   - **Hacker News (Signal-Filtered)**: Polls `/v0/topstories.json` + `/v0/beststories.json` via `ThreadPoolExecutor` (`HN_STORIES_PER_RUN=80`) and keeps only stories meeting `HN_MIN_SCORE` (default `15`), eliminating 1-point `newstories` spam while allowing rising stories to enter once they gain traction.
    - **Techmeme**: Standard RSS with conditional GET (`ETag` / `Last-Modified`), per-feed failure cooldowns, and raw Wayback Machine (`id_`) fallback.
    - **Specialist Engineering & Frontier Lab RSS/Atom (`fetch_standard_rss_2`)**: Enriched parser extracting `<content:encoded>`, tags, author, and OpenGraph fallback snippets across PyTorch Blog, Hugging Face Blog, NVIDIA Developer Blog, DuckDB Blog, LangChain Blog, Qdrant Blog, OpenAI News, Google DeepMind Blog, Google Research Blog, and The Register AI.
    - **OSS Ecosystem Release Feeds (`fetch_ecosystem_releases_rss`)**: Curated GitHub Atom release streams for `vLLM`, `SGLang`, `llama.cpp`, `PyTorch`, `Transformers`, `Ray`, `Polars`, `LiteLLM`, and `Open WebUI` (noisy raw commit streams removed).
@@ -14,16 +14,16 @@ A hardened, two-phase trend-monitoring, LLM-filtering, SQLite-archiving, and Tel
    - **Optional SEC EDGAR EFTS (`ENABLE_SEC_EDGAR=false`)**: Full-text search across public filings scoped to AI models and software stack keywords.
 
 2. **Two-Phase Decoupled Queue Runtime (`APScheduler`)**
-   - **Fetch phase (`fetch_and_enqueue`)**: Runs every `FETCH_MINUTES` (default 10m), tags candidates in memory via `STACK_DOMAIN_TAXONOMY`, balances sources via `fair_cap_items()` (round-robin prioritizing signal matches within each source), strips tracking URL params, hashes SHA-256 title fingerprints, deduplicates against bounded in-memory caches and SQLite (`processed_urls`, `processed_fingerprints`), and pushes new candidates into `CANDIDATE_QUEUE`.
-   - **Flush phase (`maybe_flush` -> `drain_queue` -> `flush_queue`)**: Checked every `CHECK_QUEUE_SECONDS` (default 60s). Flushes when queue depth reaches `QUEUE_FLUSH_LIMIT` (default 32) or after `FORCE_FLUSH_MINUTES` (default 30m) of staleness. Failed OpenRouter batches are automatically requeued up to `MAX_ITEM_RETRIES` (default 5).
+   - **Fetch phase (`fetch_and_enqueue`)**: Runs every `FETCH_MINUTES` (default `2m`), tags candidates in memory via `STACK_DOMAIN_TAXONOMY`, balances sources via `fair_cap_items()` (`MAX_CANDIDATES_PER_RUN=1000`, round-robin prioritizing signal matches within each source), strips tracking URL params, hashes SHA-256 title fingerprints, deduplicates against bounded in-memory caches and SQLite (`processed_urls`, `processed_fingerprints`), and pushes new candidates into `CANDIDATE_QUEUE` (`CANDIDATE_QUEUE_MAX=480`).
+   - **Flush phase (`maybe_flush` -> `drain_queue` -> `flush_queue`)**: Checked every `CHECK_QUEUE_SECONDS` (default `1s`). Flushes immediately when queue depth reaches `QUEUE_FLUSH_LIMIT` (default `1`) or after `FORCE_FLUSH_MINUTES` (default `30m`) of staleness. Failed OpenRouter batches are automatically requeued up to `MAX_ITEM_RETRIES` (default `5`).
 
 3. **Strict OpenRouter LLM Classifier & SQLite WAL Store**
-   - Evaluates items in batches (`LLM_BATCH_SIZE=8`, `temperature=0.05`, JSON mode) strictly against the 10 AI Models & Software Stack layers, rejecting physical hardware/cooling/packaging (`ai-hardware-bot`), Quantum QPUs (`ai-hardware-bot`), non-AI hard sciences (`frontier-deeptech-bot`), and generic consumer/marketing fluff.
-   - Persists accepted signals (`score >= 7.0`) into `ai_stack_trends.db` (SQLite WAL mode) with structured fields: `stack_layer`, `bottleneck_addressed`, `specific_tech`, `relevance_score`, `why_it_matters`, `ai_stack_thesis`, `telegram_summary`, and `raw_llm_json`.
+   - Evaluates items in batches (`LLM_BATCH_SIZE=12`, `temperature=0.05`, JSON mode) strictly against the 10 AI Models & Software Stack layers, rejecting physical hardware/cooling/packaging (`ai-hardware-bot`), Quantum QPUs (`ai-hardware-bot`), non-AI hard sciences (`frontier-deeptech-bot`), and generic consumer/marketing fluff.
+   - Persists accepted signals (`score >= 7.0`) into `ai_stack_quantum_trends.db` (SQLite WAL mode) with structured fields: `stack_layer`, `bottleneck_addressed`, `specific_tech`, `relevance_score`, `why_it_matters`, `ai_stack_thesis`, `telegram_summary`, and `raw_llm_json`.
 
 4. **Telegram Alerting & Digests**
-   - Items scoring `>= ALERT_THRESHOLD` (default `8.5`) trigger immediate HTML alerts (`MAX_ALERTS_PER_FLUSH=8`).
-   - Remaining accepted items (`>= 7.0`) are delivered in periodic digests every `DIGEST_MINUTES` (default 360m), chunked cleanly under Telegram's message limit.
+   - Items scoring `>= ALERT_THRESHOLD` (default `7.5`) trigger immediate HTML alerts (`MAX_ALERTS_PER_FLUSH=8`).
+   - Remaining accepted items (`>= 7.0`) are delivered in periodic digests every `DIGEST_MINUTES` (default `60m`, `DIGEST_MAX_ITEMS=5`), chunked cleanly under Telegram's message limit.
 
 ---
 
