@@ -14,7 +14,7 @@ A hardened, two-phase trend-monitoring, LLM-filtering, SQLite-archiving, and Tel
    - **Optional SEC EDGAR EFTS (`ENABLE_SEC_EDGAR=false`)**: Full-text search across public filings scoped to AI models and software stack keywords.
 
 2. **Two-Phase Decoupled Queue Runtime (`APScheduler`)**
-   - **Fetch phase (`fetch_and_enqueue`)**: Runs every `FETCH_MINUTES` (default `2m`), tags candidates in memory via `STACK_DOMAIN_TAXONOMY`, balances sources via `fair_cap_items()` (`MAX_CANDIDATES_PER_RUN=1000`, round-robin prioritizing signal matches within each source), strips tracking URL params, hashes SHA-256 title fingerprints, deduplicates against bounded in-memory caches and SQLite (`processed_urls`, `processed_fingerprints`), and pushes new candidates into `CANDIDATE_QUEUE` (`CANDIDATE_QUEUE_MAX=480`).
+   - **Fetch phase (`fetch_and_enqueue`)**: Runs every `FETCH_MINUTES` (default `2m`), balances sources via `fair_cap_items()` (`MAX_CANDIDATES_PER_RUN=1000`, pure round-robin across sources), strips tracking URL params, hashes SHA-256 title fingerprints, deduplicates against bounded in-memory caches and SQLite (`processed_urls`, `processed_fingerprints`), and pushes new candidates into `CANDIDATE_QUEUE` (`CANDIDATE_QUEUE_MAX=480`).
    - **Flush phase (`maybe_flush` -> `drain_queue` -> `flush_queue`)**: Checked every `CHECK_QUEUE_SECONDS` (default `1s`). Flushes immediately when queue depth reaches `QUEUE_FLUSH_LIMIT` (default `1`) or after `FORCE_FLUSH_MINUTES` (default `30m`) of staleness. Failed OpenRouter batches are automatically requeued up to `MAX_ITEM_RETRIES` (default `5`).
 
 3. **Strict OpenRouter LLM Classifier & SQLite WAL Store**
