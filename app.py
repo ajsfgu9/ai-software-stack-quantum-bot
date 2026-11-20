@@ -222,282 +222,6 @@ DEFAULT_SEC_EFTS_QUERY = (
 SEC_EFTS_QUERY = os.getenv("SEC_EFTS_QUERY", DEFAULT_SEC_EFTS_QUERY).strip()
 
 
-# =========================
-# Unified Domain Taxonomy (10 AI Models & Software Stack Layers; Quantum delegated to ai-hardware-bot)
-# =========================
-STACK_DOMAIN_TAXONOMY = [
-    {
-        "layer": "1. Data Engineering & Preprocessing",
-        "bottleneck": "data throughput / GPU utilization / tokenization efficiency",
-        "subtopics": [
-            (
-                "Data Wrangling & Pipeline Orchestration (Apache Spark, Ray Data, Polars, DuckDB, MinHash LSH, fastText, PII redaction)",
-                re.compile(
-                    r"\b(Apache\s+Spark|PySpark|Ray\s+Data|\bPolars\b|\bDuckDB\b|MinHash\s+LSH|deduplication|heuristic\s+filtering|fastText|PII\s+redaction|petabyte-scale\s+(?:data|pipeline)|GPU\s+(?:data\s+starvation|under-?utilization)|data\s+contamination)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Tokenization Engines (Hugging Face Tokenizers, tiktoken, SentencePiece, BPE, Unigram, vocabulary fertility)",
-                re.compile(
-                    r"\b(Hugging\s+Face\s+Tokenizers?|tiktoken|SentencePiece|byte-?pair\s+encoding|\bBPE\b\s+tokeniz|Unigram\s+tokeniz|subword\s+(?:splitting|tokenization)|token-?to-?word\s+ratio|tokenizer\s+(?:fertility|compression|throughput))\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "2. Deep Learning Frameworks & Distributed Training",
-        "bottleneck": "training scale / memory OOM / pipeline bubble / alignment",
-        "subtopics": [
-            (
-                "Core Frameworks (PyTorch, JAX, TensorFlow, torch.compile, TorchDynamo, TorchInductor, autograd)",
-                re.compile(
-                    r"\b(PyTorch|\bJAX\b|TensorFlow|torch\.compile|TorchDynamo|TorchInductor|TorchTitan|automatic\s+kernel\s+fusion|autograd\s+engine|XLA\s+compiler)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Distributed Parallelism & Scaling Engines (DeepSpeed, Megatron-LM, FSDP, PyTorch Distributed, Ray Train, TP/PP/ZeRO)",
-                re.compile(
-                    r"\b(DeepSpeed|Megatron-?LM|\bFSDP2?\b|PyTorch\s+Distributed|Ray\s+Train|tensor\s+parallelism|pipeline\s+parallelism|Zero\s+Redundancy\s+Optimizer|ZeRO\s+Stage\s+[123]|pipeline\s+bubble|3D\s+parallelism|context\s+parallelism)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Fine-Tuning & Alignment Libraries (Hugging Face TRL, Unsloth, Axolotl, PEFT, LoRA, QLoRA, SFT, RLHF, DPO, KTO, GRPO)",
-                re.compile(
-                    r"\b(Hugging\s+Face\s+TRL|\bTRL\b.*?(?:RLHF|DPO|SFT|KTO|GRPO)|Unsloth|Axolotl|\bPEFT\b|\bLoRA\b|\bQLoRA\b|Direct\s+Preference\s+Optimization|\bDPO\b.*?(?:align|fine-?tun|LLM)|\bKTO\b.*?(?:align|fine-?tun)|\bGRPO\b|\bRLHF\b|post-?training\s+alignment)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "3. Low-Level GPU Acceleration & Acceleration Kernels",
-        "bottleneck": "kernel FLOPs / HBM-SRAM IO / collective communication",
-        "subtopics": [
-            (
-                "Hardware Drivers & Compute Platforms (NVIDIA CUDA, AMD ROCm, Intel oneAPI, streaming multiprocessors)",
-                re.compile(
-                    r"\b(NVIDIA\s+CUDA|\bCUDA\b\s+(?:1[23]\.\d|kernel|driver|runtime|PTX|graph)|AMD\s+ROCm|\bROCm\b\s+[67]\.\d|Intel\s+oneAPI|streaming\s+multiprocessor|kernel\s+launch\s+(?:overhead|failure))\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Low-Level Math & Primitive Libraries (cuDNN, cuBLAS, CUTLASS, GEMM, Hopper/Blackwell Tensor Cores)",
-                re.compile(
-                    r"\b(cuDNN|cuBLAS|cuBLASLt|CUTLASS|rocBLAS|MIOpen|\bGEMM\b\s+(?:kernel|tensor\s+core|FP8|FP4)|Hopper\s+tensor\s+core|Blackwell\s+tensor\s+core|WGMMA|tcgen05)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Inter-GPU Communication (NCCL, RCCL, AllReduce, AllGather, ReduceScatter, NVLink/NVSwitch/InfiniBand/RoCE)",
-                re.compile(
-                    r"\b(\bNCCL\b|\bRCCL\b|Collective\s+Communications\s+Library|AllReduce|AllGather|ReduceScatter|All-?to-?All\s+collective|NVLink.*?(?:NCCL|collective|AllReduce)|InfiniBand.*?RoCE|RDMA\s+collective)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Custom Fused Kernels (FlashAttention-2/3/4, vLLM PagedAttention, Triton, IO-aware HBM/SRAM fusion)",
-                re.compile(
-                    r"\b(FlashAttention(?:-[234])?|PagedAttention|OpenAI\s+Triton|Triton\s+(?:kernel|compiler|GPU)|fused\s+(?:GPU\s+)?kernel|IO-?aware\s+attention|HBM\s+(?:to|and)\s+SRAM|FlexAttention|FlashInfer)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "4. Model Optimization & Quantization",
-        "bottleneck": "model footprint / VRAM / perplexity / TTFT compilation",
-        "subtopics": [
-            (
-                "Quantization Toolkits (AutoGPTQ, AutoAWQ, bitsandbytes, llama.cpp, GGML, GGUF, INT8/INT4/FP8/FP4/k-quants)",
-                re.compile(
-                    r"\b(AutoGPTQ|AutoAWQ|bitsandbytes|llama\.cpp|\bGGML\b|\bGGUF\b|k-?quants?|GPTQ|AWQ|SmoothQuant|weight-?only\s+quantization|weight-?activation\s+quantization|(?:INT8|INT4|FP8|FP4|NVFP4|MXFP4)\s+quantization|perplexity\s+degradation)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Model Compilers & Engines (TensorRT-LLM, ONNX Runtime, Apache TVM, OpenVINO, operator fusion)",
-                re.compile(
-                    r"\b(TensorRT-?LLM|ONNX\s+Runtime|Apache\s+TVM|\bTVM\b\s+(?:compiler|graph|MLC)|OpenVINO|constant\s+folding|graph\s+compil(?:er|ation)\s+(?:GPU|NPU|edge)|time-?to-?first-?token|\bTTFT\b)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "5. Serving & Inference Engines",
-        "bottleneck": "inference throughput (QPS) / concurrency / KV-cache / edge latency",
-        "subtopics": [
-            (
-                "High-Throughput Engines (vLLM, SGLang, TGI, TensorRT-LLM, Triton Inference Server, continuous batching, prefix caching)",
-                re.compile(
-                    r"\b(\bvLLM\b|SGLang|Text\s+Generation\s+Inference|\bTGI\b\s+(?:serving|inference|Hugging\s+Face)|Triton\s+Inference\s+Server|continuous\s+batching|iteration-?level\s+scheduling|prefix\s+caching|KV-?cache\s+(?:allocation|paging|offload|compression)|disaggregated\s+prefill)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Local & Edge Runtimes (Ollama, llama.cpp, ExLlamaV2/V3, MLC-LLM, Metal/Apple Silicon, Vulkan, AVX-512)",
-                re.compile(
-                    r"\b(\bOllama\b|ExLlamaV[23]|MLC-?LLM|Apple\s+Silicon\s+(?:Metal|MLX|inference)|Vulkan\s+(?:LLM|inference|llama\.cpp)|AVX-?512\s+(?:LLM|inference|quant)|local\s+LLM\s+runtime|offline\s+inference\s+engine)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "6. Application Orchestration, RAG & Middleware",
-        "bottleneck": "retrieval recall / RAG latency / structured output / prompt injection",
-        "subtopics": [
-            (
-                "Chaining & Agent Frameworks (LangChain, LangGraph, LlamaIndex, CrewAI, MCP, tool execution, state machines)",
-                re.compile(
-                    r"\b(LangChain|LangGraph|LlamaIndex|CrewAI|Model\s+Context\s+Protocol|\bMCP\b\s+(?:server|client|tool)|agent\s+state\s+machine|function\s+calling\s+orchestration|tool\s+execution\s+framework|agentic\s+drift|multi-?turn\s+agent\s+orchestration)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Vector Databases & Retrieval Engines (Milvus, Qdrant, Chroma, Pinecone, pgvector, HNSW, RAG recall)",
-                re.compile(
-                    r"\b(\bMilvus\b|\bQdrant\b|ChromaDB|\bChroma\b\s+vector|Pinecone|pgvector|vector\s+database|retrieval-?augmented\s+generation|\bRAG\b\s+(?:pipeline|retrieval|recall|latency|chunking|rerank)|HNSW\s+index|hybrid\s+vector\s+search)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Guardrails & Structured Parsing (Outlines, Instructor, NeMo Guardrails, Guidance, grammar-constrained decoding)",
-                re.compile(
-                    r"\b(Outlines\s+(?:structured|grammar|JSON|LLM)|Instructor\s+(?:structured|Pydantic|LLM)|NeMo\s+Guardrails|Microsoft\s+Guidance|grammar-?constrained\s+decoding|constrained\s+decoding|logit\s+masking|JSON\s+schema\s+(?:enforcement|decoding)|prompt\s+injection\s+(?:detection|defense|guardrail))\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "7. API Gateway & Model Routing",
-        "bottleneck": "gateway availability / failover / rate limiting / SSE streaming transport",
-        "subtopics": [
-            (
-                "Routing & Proxy Gateways (LiteLLM, Portkey, OpenResty, Envoy, Kong, fallback cascading, cost tracking)",
-                re.compile(
-                    r"\b(LiteLLM|Portkey|OpenResty|Envoy\s+(?:AI\s+)?(?:gateway|proxy)|Kong\s+(?:AI\s+)?gateway|LLM\s+(?:gateway|router|proxy)|model\s+routing|fallback\s+cascading|multi-?provider\s+failover|token\s+rate-?limiting)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Backend Web Frameworks (FastAPI, gRPC, Uvicorn, async dispatch, Server-Sent Events SSE streaming)",
-                re.compile(
-                    r"\b(FastAPI|\bgRPC\b.*?(?:LLM|inference|streaming|Triton|vLLM)|Uvicorn|Server-?Sent\s+Events|\bSSE\b\s+(?:streaming|transport|token)|async\s+(?:inference|request)\s+dispatch)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "8. End-User Presentation & Interface (UX)",
-        "bottleneck": "perceived latency / token streaming UX / error resilience",
-        "subtopics": [
-            (
-                "User Interfaces & Prototyping UIs (Open WebUI, LibreChat, Next.js Chat UI, Gradio, Streamlit, optimistic UI)",
-                re.compile(
-                    r"\b(Open\s+WebUI|LibreChat|Next\.js\s+(?:AI|chat)\s+(?:UI|interface|SDK)|Vercel\s+AI\s+SDK|\bGradio\b|\bStreamlit\b|token-?by-?token\s+streaming|optimistic\s+UI\s+update|markdown\s+(?:and\s+LaTeX|streaming)\s+render)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "9. Frontier Foundation Models, Multimodal & Test-Time Compute",
-        "bottleneck": "reasoning scaling / multimodal world modeling / context & verification",
-        "subtopics": [
-            (
-                "Frontier Foundation Models & Test-Time Compute (reasoning models, PRMs, MCTS search, RL for reasoning, formal verification)",
-                re.compile(
-                    r"\b(frontier\s+(?:foundation\s+)?model|test-?time\s+(?:compute|scaling|search|training)|inference-?time\s+(?:compute|reasoning|scaling|verification)|process\s+reward\s+model|\bPRM\b.*?reason|Monte\s+Carlo\s+Tree\s+Search|tree-?of-?thought|chain-?of-?thought\s+verification|automated\s+theorem\s+proving|AlphaProof|formal\s+verification.*?(?:model|LLM|code)|Mixture-?of-?Experts|\bMoE\b\s+(?:model|architecture|routing))\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "Multimodal & World Models (video/audio/speech-to-speech/3D generation, diffusion transformers, world simulation)",
-                re.compile(
-                    r"\b(world\s+model|world\s+simulation|video\s+generation\s+model|speech-?to-?speech\s+model|native\s+multimodal|omni-?modal|vision-?language-?action|\bVLA\b\s+model|diffusion\s+transformer|\bDiT\b.*?(?:video|image|3D)|3D\s+generation\s+model|multimodal\s+foundation\s+model)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-    {
-        "layer": "10. Autonomous Agent Swarms, AI Safety, Interpretability & Evals",
-        "bottleneck": "agentic autonomy / mechanistic transparency / alignment & eval reliability",
-        "subtopics": [
-            (
-                "Autonomous Agent Swarms & Computer/Coding Agents (self-directing multi-agent systems, recursive optimization, computer use)",
-                re.compile(
-                    r"\b(autonomous\s+agent\s+(?:swarm|system|framework|workflow)|agent\s+swarm|multi-?agent\s+(?:swarm|system|orchestration|collaboration)|recursive\s+(?:self-?improvement|prompt\s+optimization|architecture\s+optimization)|computer-?use\s+agent|coding\s+agent|self-?evolving\s+agent|agentic\s+coding)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-            (
-                "AI Safety, Alignment, Mechanistic Interpretability & Frontier Evals (sparse autoencoders, circuits, red-teaming, benchmarks)",
-                re.compile(
-                    r"\b(mechanistic\s+interpretability|sparse\s+autoencoder|\bSAE\b.*?(?:feature|interpretability|circuit)|AI\s+alignment|scalable\s+oversight|weak-?to-?strong\s+generalization|frontier\s+(?:eval|benchmark|red\s+team)|model\s+evaluation\s+(?:suite|benchmark)|alignment\s+faking|reward\s+hacking|sleeper\s+agent|AI\s+control\s+protocol)\b",
-                    re.IGNORECASE,
-                ),
-            ),
-        ],
-    },
-]
-
-
-def match_stack_signals(item):
-    """Scan item text equally across all 10 AI Models & Software Stack layers."""
-    haystack = " ".join(
-        [
-            clean_text(item.get("title", "")),
-            clean_text(item.get("raw_summary", "")),
-            clean_text(item.get("category", "")),
-        ]
-    )
-    if not haystack:
-        return []
-
-    matched = []
-    for entry in STACK_DOMAIN_TAXONOMY:
-        subs = [sub_name for sub_name, pat in entry["subtopics"] if pat.search(haystack)]
-        if subs:
-            matched.append(
-                {
-                    "layer": entry["layer"],
-                    "bottleneck": entry["bottleneck"],
-                    "subtopics": subs,
-                }
-            )
-    return matched
-
-
-def enrich_item_with_stack_signals(item):
-    """Tag candidate item in-place across all 10 target layers prior to capping and LLM classification."""
-    matches = match_stack_signals(item)
-    if not matches:
-        return item
-
-    layers = []
-    subtopics = []
-    for m in matches:
-        if m["layer"] not in layers:
-            layers.append(m["layer"])
-        for s in m["subtopics"]:
-            if s not in subtopics:
-                subtopics.append(s)
-
-    item["stack_signal_layers"] = " | ".join(layers)
-    item["stack_signal_subtopics"] = " ; ".join(subtopics)
-    item["stack_layer_hint"] = matches[0]["layer"]
-    item["bottleneck_hint"] = matches[0]["bottleneck"]
-    return item
-
-
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html, application/json;q=0.9, */*;q=0.8",
@@ -636,36 +360,24 @@ def chunk_list(values, size):
 
 
 def fair_cap_items(items, max_items):
-    """Apply a global cap without letting one source dominate the run,
-    treating all sources and all 10 target layers equally while prioritizing signal-matched items within each source."""
-    for item in items:
-        enrich_item_with_stack_signals(item)
+    """Interleave items round-robin across sources and apply a global cap without letting one source dominate."""
+    if not items:
+        return []
 
-    if max_items <= 0 or len(items) <= max_items:
-        return items
-
-    grouped_signal = defaultdict(list)
-    grouped_other = defaultdict(list)
+    grouped = defaultdict(deque)
     source_order = []
     for item in items:
         source = item.get("source", "unknown")
-        if source not in grouped_signal and source not in grouped_other:
+        if source not in grouped:
             source_order.append(source)
-        if item.get("stack_signal_layers"):
-            grouped_signal[source].append(item)
-        else:
-            grouped_other[source].append(item)
+        grouped[source].append(item)
 
-    grouped = {
-        source: deque(grouped_signal[source] + grouped_other[source])
-        for source in source_order
-    }
-
+    limit = max_items if max_items > 0 else len(items)
     result = []
-    while len(result) < max_items and source_order:
+    while len(result) < limit and source_order:
         next_order = []
         for source in source_order:
-            if grouped[source] and len(result) < max_items:
+            if grouped[source] and len(result) < limit:
                 result.append(grouped[source].popleft())
             if grouped[source]:
                 next_order.append(source)
@@ -1818,9 +1530,6 @@ def classify_batch(candidates):
 
     compact_items = []
     for index, item in enumerate(candidates):
-        signals = match_stack_signals(item)
-        matched_layers = ", ".join(s["layer"] for s in signals)
-        matched_subs = "; ".join(sub for s in signals for sub in s["subtopics"])
         compact_items.append(
             {
                 "index": index,
@@ -1830,7 +1539,6 @@ def classify_batch(candidates):
                 "summary": item.get("raw_summary", "")[:2200],
                 "url": item.get("url", "")[:400],
                 "published_at": item.get("published_at", "")[:80],
-                "detected_stack_signals": f"{matched_layers} ({matched_subs})"[:350] if matched_subs else "",
             }
         )
 
@@ -2019,15 +1727,11 @@ def classify_and_insert(candidates):
                 continue
 
             cap = LLM_TEXT_FIELD_MAX_CHARS
-            enrich_item_with_stack_signals(original)
-            resolved_layer = clean_text(result.get("stack_layer", "")) or original.get("stack_layer_hint", "")
-            resolved_bottleneck = clean_text(result.get("bottleneck_addressed", "")) or original.get("bottleneck_hint", "")
-
             item = {
                 **original,
                 "category": clean_text(result.get("category", ""))[:cap],
-                "stack_layer": resolved_layer[:cap],
-                "bottleneck_addressed": resolved_bottleneck[:cap],
+                "stack_layer": clean_text(result.get("stack_layer", ""))[:cap],
+                "bottleneck_addressed": clean_text(result.get("bottleneck_addressed", ""))[:cap],
                 "specific_tech": clean_text(result.get("specific_tech", ""))[:cap],
                 "relevance_score": score,
                 "why_it_matters": clean_text(result.get("why_it_matters", ""))[:cap],
@@ -2151,7 +1855,6 @@ def fetch_and_enqueue():
         if not url:
             continue
         item["url"] = url
-        enrich_item_with_stack_signals(item)
         fp = item_fingerprint(item)
         item["content_fingerprint"] = fp
 
@@ -2327,7 +2030,7 @@ def print_config():
     log.info(f"ENABLE_ECOSYSTEM_RELEASES_RSS: {ENABLE_ECOSYSTEM_RELEASES_RSS} feeds: {len(get_feed_specs('ECOSYSTEM_RELEASES_RSS_FEEDS', DEFAULT_ECOSYSTEM_RELEASES_RSS_FEEDS))} per feed: {ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED}")
     log.info(f"ENABLE_HTML_SCRAPER: {ENABLE_HTML_SCRAPER} targets: {len(get_feed_specs('HTML_SCRAPER_TARGETS', DEFAULT_HTML_SCRAPER_TARGETS))} per site: {HTML_SCRAPER_MAX_ITEMS_PER_SITE}")
     log.info(f"ENABLE_SEC_EDGAR: {ENABLE_SEC_EDGAR} forms: {SEC_FORMS} lookback_days: {SEC_LOOKBACK_DAYS} max_items: {SEC_MAX_ITEMS_PER_FETCH}")
-    log.info(f"Tracked domains: {len(STACK_DOMAIN_TAXONOMY)} (10 AI Models & Software Stack layers)")
+    log.info("Tracked layers: 10 AI Models & Software Stack layers (LLM classifier)")
     log.info(f"Telegram token found: {bool(TELEGRAM_BOT_TOKEN)}")
     log.info(f"Telegram chat found: {bool(TELEGRAM_CHAT_ID)}")
     log.info(f"OpenRouter key found: {bool(OPENROUTER_API_KEY)}")
