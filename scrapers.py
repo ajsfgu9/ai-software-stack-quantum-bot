@@ -16,7 +16,7 @@ try:
 except ImportError:
     curl_requests = None
 
-log = logging.getLogger("ai_stack_quantum_bot")
+log = logging.getLogger("ai_stack_bot")
 
 # Fallback headers used ONLY when curl_cffi is unavailable (plain requests).
 # When curl_cffi is active, never override User-Agent or Sec-Ch-Ua* headers:
@@ -33,7 +33,9 @@ JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()
 # Domains known to return HTTP 403 to plain Python requests TLS fingerprints;
 # skip straight to browser TLS impersonation (curl_cffi) on these domains.
 _TLS_IMPERSONATE_DOMAINS = {
-    "thequantuminsider.com",
+    "openai.com",
+    "anthropic.com",
+    "ai.meta.com",
     "developer.nvidia.com",
     "rocm.blogs.amd.com",
 }
@@ -766,12 +768,82 @@ def scrape_rocm_blogs(base_url, label, max_items, normalize_url_fn=_normalize_ur
     return _scrape_wayback_html_fallback(blog_url, label, pattern, ignore_patterns, max_items, normalize_url_fn)
 
 
+def scrape_anthropic_pages(base_url, label, max_items, normalize_url_fn=_normalize_url):
+    """Dedicated scraper for Anthropic News & Research (no official RSS feed; HTML -> Jina Reader -> Sitemap -> Wayback)."""
+    page_url = base_url or "https://www.anthropic.com/news"
+    if "/research" in page_url.lower():
+        pattern = r"/research/[a-z0-9-]{4,}"
+    else:
+        pattern = r"/(?:news|research|engineering)/[a-z0-9-]{4,}"
+    ignore_patterns = re.compile(
+        r"/(careers|company|legal|privacy|terms|pricing|login|contact|claude|api)/?$",
+        re.IGNORECASE,
+    )
+
+    try:
+        resp = browser_get(page_url, timeout=20)
+        if resp.status_code == 200:
+            items = _parse_html_articles(
+                decode_response_text(resp), page_url, label, pattern, ignore_patterns, max_items, normalize_url_fn
+            )
+            if items:
+                log.info(f"scraper[Anthropic]: extracted {len(items)} items from HTML ({page_url})")
+                return items
+    except Exception as exc:
+        log.info(f"scraper[Anthropic]: HTML fetch issue ({page_url}): {repr(exc)}")
+
+    items = _scrape_via_jina_reader(page_url, label, pattern, ignore_patterns, max_items, normalize_url_fn)
+    if items:
+        log.info(f"scraper[Anthropic]: extracted {len(items)} items via Jina Reader ({page_url})")
+        return items
+
+    items = _scrape_xml_sitemap(
+        ["https://www.anthropic.com/sitemap.xml"], label, pattern, max_items, normalize_url_fn
+    )
+    if items:
+        log.info(f"scraper[Anthropic]: extracted {len(items)} items via XML sitemap")
+        return items
+
+    return _scrape_wayback_html_fallback(page_url, label, pattern, ignore_patterns, max_items, normalize_url_fn)
+
+
+def scrape_meta_ai_blog(base_url, label, max_items, normalize_url_fn=_normalize_url):
+    """Dedicated scraper for Meta AI Blog (no official RSS feed; HTML -> Jina Reader -> Wayback)."""
+    blog_url = base_url or "https://ai.meta.com/blog/"
+    pattern = r"/blog/[a-z0-9-]{4,}/?"
+    ignore_patterns = re.compile(
+        r"/(about|careers|legal|privacy|terms|contact|research|demos)/?$",
+        re.IGNORECASE,
+    )
+
+    try:
+        resp = browser_get(blog_url, timeout=20)
+        if resp.status_code == 200:
+            items = _parse_html_articles(
+                decode_response_text(resp), blog_url, label, pattern, ignore_patterns, max_items, normalize_url_fn
+            )
+            if items:
+                log.info(f"scraper[Meta AI]: extracted {len(items)} items from HTML")
+                return items
+    except Exception as exc:
+        log.info(f"scraper[Meta AI]: HTML fetch issue: {repr(exc)}")
+
+    items = _scrape_via_jina_reader(blog_url, label, pattern, ignore_patterns, max_items, normalize_url_fn)
+    if items:
+        log.info(f"scraper[Meta AI]: extracted {len(items)} items via Jina Reader")
+        return items
+
+    return _scrape_wayback_html_fallback(blog_url, label, pattern, ignore_patterns, max_items, normalize_url_fn)
+
+
 DEDICATED_SCRAPERS = {
     "vllm.ai": scrape_vllm_blog,
     "unsloth.ai": scrape_unsloth_blog,
     "ollama.com": scrape_ollama_blog,
     "pola.rs": scrape_polars_blog,
     "rocm.blogs.amd.com": scrape_rocm_blogs,
+    "anthropic.com": scrape_anthropic_pages,
+    "ai.meta.com": scrape_meta_ai_blog,
 }
 
 

@@ -34,7 +34,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("ai_stack_quantum_bot")
+log = logging.getLogger("ai_stack_bot")
 
 # =========================
 # Environment helpers
@@ -101,7 +101,7 @@ def get_feed_specs(name, default_specs=None):
 # Configuration
 # =========================
 
-DB_PATH = os.getenv("DB_PATH", "/app/data/ai_stack_quantum_trends.db").strip()
+DB_PATH = os.getenv("DB_PATH", "/app/data/ai_stack_trends.db").strip()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -121,7 +121,11 @@ LLM_MIN_SCORE = get_float("LLM_MIN_SCORE", 7.0)
 ALERT_THRESHOLD = get_float("ALERT_THRESHOLD", 8.5)
 
 ARXIV_RESULTS_PER_CATEGORY = get_int("ARXIV_RESULTS_PER_CATEGORY", 20)
-HN_NEW_STORIES_PER_RUN = get_int("HN_NEW_STORIES_PER_RUN", 80)
+HN_STORIES_PER_RUN = get_int(
+    "HN_STORIES_PER_RUN",
+    get_int("HN_NEW_STORIES_PER_RUN", 60),
+)
+HN_MIN_SCORE = get_int("HN_MIN_SCORE", 15)
 TECHMEME_MAX_ITEMS = get_int("TECHMEME_MAX_ITEMS", 40)
 
 MAX_ALERTS_PER_FLUSH = get_int("MAX_ALERTS_PER_FLUSH", 8)
@@ -154,11 +158,12 @@ HEALTHCHECK_FILE = os.getenv("HEALTHCHECK_FILE", "/app/data/heartbeat.txt").stri
 LLM_TEXT_FIELD_MAX_CHARS = get_int("LLM_TEXT_FIELD_MAX_CHARS", 500)
 
 DEFAULT_ARXIV_CATEGORIES = [
-    "cs.LG", "cs.CL", "cs.DC", "cs.PL", "cs.DB", "cs.SE", "cs.IR", "cs.HC", "quant-ph",
+    "cs.AI", "cs.LG", "cs.CL", "cs.CV", "cs.MA",
+    "cs.DC", "cs.PL", "cs.DB", "cs.SE", "cs.IR", "cs.HC",
 ]
 ARXIV_CATEGORIES = get_csv("ARXIV_CATEGORIES", DEFAULT_ARXIV_CATEGORIES)
 
-# Step 1: Specialist AI software stack & quantum media/engineering feeds
+# Step 1: Specialist AI software stack & frontier lab RSS/Atom feeds
 ENABLE_SPECIALIST_RSS = get_bool("ENABLE_SPECIALIST_RSS", True)
 SPECIALIST_RSS_MAX_ITEMS_PER_FEED = get_int("SPECIALIST_RSS_MAX_ITEMS_PER_FEED", 12)
 DEFAULT_SPECIALIST_RSS_FEEDS = [
@@ -168,24 +173,25 @@ DEFAULT_SPECIALIST_RSS_FEEDS = [
     ("DuckDB Blog", "https://duckdb.org/feed.xml"),
     ("LangChain Blog", "https://blog.langchain.com/rss/"),
     ("Qdrant Blog", "https://qdrant.tech/blog/index.xml"),
-    ("Quantum Computing Report", "https://quantumcomputingreport.com/feed/"),
-    ("The Quantum Insider", "https://thequantuminsider.com/feed/"),
+    ("OpenAI News", "https://openai.com/news/rss.xml"),
+    ("Google DeepMind Blog", "https://deepmind.google/blog/rss.xml"),
+    ("Google Research Blog", "https://research.google/blog/rss/"),
     ("The Register AI", "https://www.theregister.com/software/ai_ml/headlines.atom"),
 ]
 
-# Step 2: Core OSS ecosystem releases & engineering commit feeds (GitHub Atom)
+# Step 2: Core OSS ecosystem release feeds (GitHub Atom — curated releases only, no raw commit firehose)
 ENABLE_ECOSYSTEM_RELEASES_RSS = get_bool("ENABLE_ECOSYSTEM_RELEASES_RSS", True)
 ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED = get_int("ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED", 8)
 DEFAULT_ECOSYSTEM_RELEASES_RSS_FEEDS = [
     ("vLLM Releases", "https://github.com/vllm-project/vllm/releases.atom"),
-    ("vLLM Daily", "https://github.com/vllm-project/vllm-daily/commits/main.atom"),
+    ("SGLang Releases", "https://github.com/sgl-project/sglang/releases.atom"),
     ("llama.cpp Releases", "https://github.com/ggml-org/llama.cpp/releases.atom"),
     ("PyTorch Releases", "https://github.com/pytorch/pytorch/releases.atom"),
+    ("Transformers Releases", "https://github.com/huggingface/transformers/releases.atom"),
     ("Ray Releases", "https://github.com/ray-project/ray/releases.atom"),
     ("Polars Releases", "https://github.com/pola-rs/polars/releases.atom"),
     ("LiteLLM Releases", "https://github.com/BerriAI/litellm/releases.atom"),
     ("Open WebUI Releases", "https://github.com/open-webui/open-webui/releases.atom"),
-    ("Qiskit Releases", "https://github.com/Qiskit/qiskit/releases.atom"),
 ]
 
 # Step 2b: Dedicated & Universal HTML Scrapers
@@ -197,24 +203,27 @@ DEFAULT_HTML_SCRAPER_TARGETS = [
     ("Ollama Blog", "https://ollama.com/blog"),
     ("Polars Blog", "https://pola.rs/posts/"),
     ("AMD ROCm Blogs", "https://rocm.blogs.amd.com/"),
+    ("Anthropic News", "https://www.anthropic.com/news"),
+    ("Anthropic Research", "https://www.anthropic.com/research"),
+    ("Meta AI Blog", "https://ai.meta.com/blog/"),
 ]
 
 # Step 3: Optional SEC EDGAR EFTS full-text search
 ENABLE_SEC_EDGAR = get_bool("ENABLE_SEC_EDGAR", False)
-SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "AI-Stack-Quantum-Bot/1.0 contact@example.com").strip()
+SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "AI-Models-Stack-Bot/1.1 contact@example.com").strip()
 SEC_FORMS = get_csv("SEC_FORMS", ["8-K", "10-Q", "10-K", "S-1", "F-1", "20-F", "6-K"])
 SEC_LOOKBACK_DAYS = get_int("SEC_LOOKBACK_DAYS", 3)
 SEC_MAX_ITEMS_PER_FETCH = get_int("SEC_MAX_ITEMS_PER_FETCH", 40)
 DEFAULT_SEC_EFTS_QUERY = (
     '"CUDA" OR "ROCm" OR "TensorRT" OR "vLLM" OR "FlashAttention" '
-    'OR "vector database" OR "quantization" OR "quantum computing" '
-    'OR "logical qubit" OR "fault-tolerant quantum" OR "quantum error correction"'
+    'OR "vector database" OR "quantization" OR "foundation model" '
+    'OR "inference engine" OR "test-time compute" OR "autonomous agent"'
 )
 SEC_EFTS_QUERY = os.getenv("SEC_EFTS_QUERY", DEFAULT_SEC_EFTS_QUERY).strip()
 
 
 # =========================
-# Unified Domain Taxonomy (Strictly Scoped to the 8 AI Software Stack Layers + Quantum Computing)
+# Unified Domain Taxonomy (10 AI Models & Software Stack Layers; Quantum delegated to ai-hardware-bot)
 # =========================
 STACK_DOMAIN_TAXONOMY = [
     {
@@ -256,9 +265,9 @@ STACK_DOMAIN_TAXONOMY = [
                 ),
             ),
             (
-                "Fine-Tuning & Alignment Libraries (Hugging Face TRL, Unsloth, Axolotl, PEFT, LoRA, QLoRA, SFT, RLHF, DPO, KTO)",
+                "Fine-Tuning & Alignment Libraries (Hugging Face TRL, Unsloth, Axolotl, PEFT, LoRA, QLoRA, SFT, RLHF, DPO, KTO, GRPO)",
                 re.compile(
-                    r"\b(Hugging\s+Face\s+TRL|\bTRL\b.*?(?:RLHF|DPO|SFT|KTO|GRPO)|Unsloth|Axolotl|\bPEFT\b|\bLoRA\b|\bQLoRA\b|Direct\s+Preference\s+Optimization|\bDPO\b.*?(?:align|fine-?tun|LLM)|\bKTO\b.*?(?:align|fine-?tun)|\bRLHF\b|post-?training\s+alignment)\b",
+                    r"\b(Hugging\s+Face\s+TRL|\bTRL\b.*?(?:RLHF|DPO|SFT|KTO|GRPO)|Unsloth|Axolotl|\bPEFT\b|\bLoRA\b|\bQLoRA\b|Direct\s+Preference\s+Optimization|\bDPO\b.*?(?:align|fine-?tun|LLM)|\bKTO\b.*?(?:align|fine-?tun)|\bGRPO\b|\bRLHF\b|post-?training\s+alignment)\b",
                     re.IGNORECASE,
                 ),
             ),
@@ -290,7 +299,7 @@ STACK_DOMAIN_TAXONOMY = [
                 ),
             ),
             (
-                "Custom Fused Kernels (FlashAttention-2/3, vLLM PagedAttention, Triton, IO-aware HBM/SRAM fusion)",
+                "Custom Fused Kernels (FlashAttention-2/3/4, vLLM PagedAttention, Triton, IO-aware HBM/SRAM fusion)",
                 re.compile(
                     r"\b(FlashAttention(?:-[234])?|PagedAttention|OpenAI\s+Triton|Triton\s+(?:kernel|compiler|GPU)|fused\s+(?:GPU\s+)?kernel|IO-?aware\s+attention|HBM\s+(?:to|and)\s+SRAM|FlexAttention|FlashInfer)\b",
                     re.IGNORECASE,
@@ -323,16 +332,16 @@ STACK_DOMAIN_TAXONOMY = [
         "bottleneck": "inference throughput (QPS) / concurrency / KV-cache / edge latency",
         "subtopics": [
             (
-                "High-Throughput Engines (vLLM, TGI, TensorRT-LLM, Triton Inference Server, continuous batching, prefix caching)",
+                "High-Throughput Engines (vLLM, SGLang, TGI, TensorRT-LLM, Triton Inference Server, continuous batching, prefix caching)",
                 re.compile(
-                    r"\b(\bvLLM\b|Text\s+Generation\s+Inference|\bTGI\b\s+(?:serving|inference|Hugging\s+Face)|Triton\s+Inference\s+Server|SGLang|continuous\s+batching|iteration-?level\s+scheduling|prefix\s+caching|KV-?cache\s+(?:allocation|paging|offload|compression)|disaggregated\s+prefill)\b",
+                    r"\b(\bvLLM\b|SGLang|Text\s+Generation\s+Inference|\bTGI\b\s+(?:serving|inference|Hugging\s+Face)|Triton\s+Inference\s+Server|continuous\s+batching|iteration-?level\s+scheduling|prefix\s+caching|KV-?cache\s+(?:allocation|paging|offload|compression)|disaggregated\s+prefill)\b",
                     re.IGNORECASE,
                 ),
             ),
             (
-                "Local & Edge Runtimes (Ollama, llama.cpp, ExLlamaV2, MLC-LLM, Metal/Apple Silicon, Vulkan, AVX-512)",
+                "Local & Edge Runtimes (Ollama, llama.cpp, ExLlamaV2/V3, MLC-LLM, Metal/Apple Silicon, Vulkan, AVX-512)",
                 re.compile(
-                    r"\b(\bOllama\b|ExLlamaV2|ExLlamaV3|MLC-?LLM|Apple\s+Silicon\s+(?:Metal|MLX|inference)|Vulkan\s+(?:LLM|inference|llama\.cpp)|AVX-?512\s+(?:LLM|inference|quant)|local\s+LLM\s+runtime|offline\s+inference\s+engine)\b",
+                    r"\b(\bOllama\b|ExLlamaV[23]|MLC-?LLM|Apple\s+Silicon\s+(?:Metal|MLX|inference)|Vulkan\s+(?:LLM|inference|llama\.cpp)|AVX-?512\s+(?:LLM|inference|quant)|local\s+LLM\s+runtime|offline\s+inference\s+engine)\b",
                     re.IGNORECASE,
                 ),
             ),
@@ -343,9 +352,9 @@ STACK_DOMAIN_TAXONOMY = [
         "bottleneck": "retrieval recall / RAG latency / structured output / prompt injection",
         "subtopics": [
             (
-                "Chaining & Agent Frameworks (LangChain, LangGraph, LlamaIndex, CrewAI, tool execution, state machines)",
+                "Chaining & Agent Frameworks (LangChain, LangGraph, LlamaIndex, CrewAI, MCP, tool execution, state machines)",
                 re.compile(
-                    r"\b(LangChain|LangGraph|LlamaIndex|CrewAI|agent\s+state\s+machine|function\s+calling\s+orchestration|tool\s+execution\s+framework|agentic\s+drift|multi-?turn\s+agent\s+orchestration)\b",
+                    r"\b(LangChain|LangGraph|LlamaIndex|CrewAI|Model\s+Context\s+Protocol|\bMCP\b\s+(?:server|client|tool)|agent\s+state\s+machine|function\s+calling\s+orchestration|tool\s+execution\s+framework|agentic\s+drift|multi-?turn\s+agent\s+orchestration)\b",
                     re.IGNORECASE,
                 ),
             ),
@@ -399,20 +408,40 @@ STACK_DOMAIN_TAXONOMY = [
         ],
     },
     {
-        "layer": "9. Quantum Computing",
-        "bottleneck": "qubit fidelity / quantum error correction / fault tolerance / quantum compilers",
+        "layer": "9. Frontier Foundation Models, Multimodal & Test-Time Compute",
+        "bottleneck": "reasoning scaling / multimodal world modeling / context & verification",
         "subtopics": [
             (
-                "Quantum Processors & Fault Tolerance (QPUs, superconducting/trapped-ion/neutral-atom/photonic/topological qubits, QEC, logical qubits)",
+                "Frontier Foundation Models & Test-Time Compute (reasoning models, PRMs, MCTS search, RL for reasoning, formal verification)",
                 re.compile(
-                    r"\b(quantum\s+(?:comput(?:ing|ers?|ation)|processors?|accelerators?|interconnects?|error\s+correction|supremacy|advantage|chemistry|annealing|memory|networking)|\bQPUs?\b|logical\s+qubits?|superconducting\s+qubits?|trapped-?ion\s+qubits?|neutral-?atom\s+qubits?|photonic\s+qubits?|silicon\s+spin\s+qubits?|topological\s+qubits?|surface\s+codes?|qLDPC|\bQEC\b|fault-?tolerant\s+quantum|cryo-?CMOS)\b",
+                    r"\b(frontier\s+(?:foundation\s+)?model|test-?time\s+(?:compute|scaling|search|training)|inference-?time\s+(?:compute|reasoning|scaling|verification)|process\s+reward\s+model|\bPRM\b.*?reason|Monte\s+Carlo\s+Tree\s+Search|tree-?of-?thought|chain-?of-?thought\s+verification|automated\s+theorem\s+proving|AlphaProof|formal\s+verification.*?(?:model|LLM|code)|Mixture-?of-?Experts|\bMoE\b\s+(?:model|architecture|routing))\b",
                     re.IGNORECASE,
                 ),
             ),
             (
-                "Quantum Software Stacks, Compilers & Hybrid Algorithms (Qiskit, Cirq, PennyLane, CUDA-Q, Braket, VQE, QAOA)",
+                "Multimodal & World Models (video/audio/speech-to-speech/3D generation, diffusion transformers, world simulation)",
                 re.compile(
-                    r"\b(\bQiskit\b|\bCirq\b|PennyLane|CUDA-?Q|Amazon\s+Braket|pytket|quantum\s+(?:compiler|transpiler|SDK|circuit\s+optimization|simulation|middleware)|\bQAOA\b|\bVQE\b|hybrid\s+quantum-?classical)\b",
+                    r"\b(world\s+model|world\s+simulation|video\s+generation\s+model|speech-?to-?speech\s+model|native\s+multimodal|omni-?modal|vision-?language-?action|\bVLA\b\s+model|diffusion\s+transformer|\bDiT\b.*?(?:video|image|3D)|3D\s+generation\s+model|multimodal\s+foundation\s+model)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ],
+    },
+    {
+        "layer": "10. Autonomous Agent Swarms, AI Safety, Interpretability & Evals",
+        "bottleneck": "agentic autonomy / mechanistic transparency / alignment & eval reliability",
+        "subtopics": [
+            (
+                "Autonomous Agent Swarms & Computer/Coding Agents (self-directing multi-agent systems, recursive optimization, computer use)",
+                re.compile(
+                    r"\b(autonomous\s+agent\s+(?:swarm|system|framework|workflow)|agent\s+swarm|multi-?agent\s+(?:swarm|system|orchestration|collaboration)|recursive\s+(?:self-?improvement|prompt\s+optimization|architecture\s+optimization)|computer-?use\s+agent|coding\s+agent|self-?evolving\s+agent|agentic\s+coding)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "AI Safety, Alignment, Mechanistic Interpretability & Frontier Evals (sparse autoencoders, circuits, red-teaming, benchmarks)",
+                re.compile(
+                    r"\b(mechanistic\s+interpretability|sparse\s+autoencoder|\bSAE\b.*?(?:feature|interpretability|circuit)|AI\s+alignment|scalable\s+oversight|weak-?to-?strong\s+generalization|frontier\s+(?:eval|benchmark|red\s+team)|model\s+evaluation\s+(?:suite|benchmark)|alignment\s+faking|reward\s+hacking|sleeper\s+agent|AI\s+control\s+protocol)\b",
                     re.IGNORECASE,
                 ),
             ),
@@ -422,7 +451,7 @@ STACK_DOMAIN_TAXONOMY = [
 
 
 def match_stack_signals(item):
-    """Scan item text equally across all 9 target domains (8 AI software stack layers + Quantum Computing)."""
+    """Scan item text equally across all 10 AI Models & Software Stack layers."""
     haystack = " ".join(
         [
             clean_text(item.get("title", "")),
@@ -448,7 +477,7 @@ def match_stack_signals(item):
 
 
 def enrich_item_with_stack_signals(item):
-    """Tag candidate item in-place across all 9 target domains prior to capping and LLM classification."""
+    """Tag candidate item in-place across all 10 target layers prior to capping and LLM classification."""
     matches = match_stack_signals(item)
     if not matches:
         return item
@@ -483,6 +512,7 @@ REQUEST_HEADERS = {
 CANDIDATE_QUEUE: list = []
 SEEN_URLS_CACHE: dict = {}
 SEEN_FINGERPRINTS_CACHE: dict = {}
+HN_QUALIFIED_IDS_CACHE: dict = {}
 _queue_lock = Lock()
 _last_flush_time: dt.datetime = None  # type: ignore[assignment]
 
@@ -607,7 +637,7 @@ def chunk_list(values, size):
 
 def fair_cap_items(items, max_items):
     """Apply a global cap without letting one source dominate the run,
-    treating all sources and all 9 target domains equally while prioritizing signal-matched items within each source."""
+    treating all sources and all 10 target layers equally while prioritizing signal-matched items within each source."""
     for item in items:
         enrich_item_with_stack_signals(item)
 
@@ -772,17 +802,6 @@ def set_state(key, value):
         (key, str(value)),
     )
     conn.commit()
-
-
-def get_hn_high_water_mark():
-    try:
-        return int(get_state("hn_high_water_mark", "0"))
-    except (TypeError, ValueError):
-        return 0
-
-
-def set_hn_high_water_mark(value):
-    set_state("hn_high_water_mark", value)
 
 
 def processed_url_exists(url):
@@ -1007,7 +1026,7 @@ def send_immediate_alerts(alert_items):
         return []
 
     items_to_send = alert_items[:MAX_ALERTS_PER_FLUSH]
-    blocks = ["🚨 <b>High-signal AI Stack &amp; Quantum alert</b>"]
+    blocks = ["🚨 <b>High-signal AI Models &amp; Software Stack alert</b>"]
     for item in items_to_send:
         blocks.append(format_item_html(item, include_score=True))
 
@@ -1040,12 +1059,12 @@ def send_digest():
 
     if not rows:
         if SEND_EMPTY_DIGEST:
-            send_telegram("🧠 <b>AI Stack &amp; Quantum digest</b>\nNo new relevant items passed the strict filter.")
+            send_telegram("🧠 <b>AI Models &amp; Software Stack digest</b>\nNo new relevant items passed the strict filter.")
         else:
             log.info("No new digest items.")
         return 0
 
-    header = f"🧠 <b>AI Stack &amp; Quantum digest</b> · {len(rows)} new signal(s)"
+    header = f"🧠 <b>AI Models &amp; Software Stack digest</b> · {len(rows)} new signal(s)"
     blocks = [header]
     for row in rows:
         blocks.append(format_item_html(row, include_score=True))
@@ -1100,11 +1119,11 @@ def send_raw_json_dump(raw_items):
 # =========================
 
 ARXIV_HEADERS = {
-    "User-Agent": "ai-software-stack-quantum-bot/1.0 (contact: your-email@example.com)"
+    "User-Agent": "ai-models-stack-bot/1.1 (contact: your-email@example.com)"
 }
 
 
-def _fetch_arxiv_atom(url, max_retries=3, timeout=30):
+def _fetch_arxiv_atom(url, max_retries=3, timeout=45):
     """Direct fetch + parse of the arXiv Atom API preserving <category> tags for bucketing."""
     last_exc = None
     for attempt in range(max_retries):
@@ -1144,7 +1163,7 @@ def fetch_arxiv():
         return items
 
     combined_query = "(" + " OR ".join(f"cat:{c}" for c in ARXIV_CATEGORIES) + ")"
-    max_results = min(1000, ARXIV_RESULTS_PER_CATEGORY * len(ARXIV_CATEGORIES) * 8)
+    max_results = min(1000, ARXIV_RESULTS_PER_CATEGORY * len(ARXIV_CATEGORIES) * 6)
 
     params = {
         "search_query": combined_query,
@@ -1187,7 +1206,11 @@ def _fetch_hn_item(session, story_id):
         if response.status_code != 200:
             return None
         hit = response.json() or {}
-        if hit.get("type") != "story":
+        if hit.get("type") != "story" or hit.get("deleted") or hit.get("dead"):
+            return None
+
+        points = int(hit.get("score") or 0)
+        if points < HN_MIN_SCORE:
             return None
 
         title = clean_text(hit.get("title", ""))
@@ -1195,18 +1218,18 @@ def _fetch_hn_item(session, story_id):
             return None
 
         link = normalize_url(hit.get("url") or f"https://news.ycombinator.com/item?id={story_id}")
-        points = hit.get("score") or 0
-        comments = hit.get("descendants") or 0
+        comments = int(hit.get("descendants") or 0)
         created_at = dt.datetime.fromtimestamp(hit.get("time", time.time()), tz=dt.timezone.utc).isoformat()
         text = clean_text(hit.get("text", ""))
 
         return {
+            "story_id": story_id,
             "title": title,
             "url": link,
-            "source": "Hacker News / newest",
+            "source": "Hacker News / top+best",
             "source_type": "community",
             "published_at": created_at,
-            "raw_summary": f"Newest Hacker News story. Points: {points}. Comments: {comments}. Text: {text[:1200]}",
+            "raw_summary": f"Trending Hacker News story. Points: {points}. Comments: {comments}. Text: {text[:1200]}",
         }
     except Exception as exc:
         log.error(f"HN item {story_id} exception: {repr(exc)}")
@@ -1214,42 +1237,55 @@ def _fetch_hn_item(session, story_id):
 
 
 def fetch_hackernews():
+    """Fetch trending Hacker News stories (topstories + beststories) filtered by HN_MIN_SCORE
+    instead of raw newstories, avoiding 1-point spam and letting stories enter once they gain traction."""
     items = []
     if not ENABLE_HACKERNEWS:
         return items
 
-    try:
-        ids_response = requests.get(
-            "https://hacker-news.firebaseio.com/v0/newstories.json",
-            headers=REQUEST_HEADERS,
-            timeout=30,
-        )
-        if ids_response.status_code != 200:
-            log.warning(f"HN newest IDs failure: {ids_response.status_code} {ids_response.text[:300]}")
-            return items
-        story_ids = ids_response.json()[:HN_NEW_STORIES_PER_RUN]
-    except Exception as exc:
-        log.error(f"HN newest IDs exception: {repr(exc)}")
+    combined_ids = []
+    seen_ids = set()
+    for endpoint in ("topstories", "beststories"):
+        try:
+            ids_response = requests.get(
+                f"https://hacker-news.firebaseio.com/v0/{endpoint}.json",
+                headers=REQUEST_HEADERS,
+                timeout=30,
+            )
+            if ids_response.status_code != 200:
+                log.warning(f"HN {endpoint} failure: {ids_response.status_code} {ids_response.text[:300]}")
+                continue
+            for sid in (ids_response.json() or [])[:HN_STORIES_PER_RUN]:
+                if sid not in seen_ids:
+                    seen_ids.add(sid)
+                    combined_ids.append(sid)
+        except Exception as exc:
+            log.error(f"HN {endpoint} exception: {repr(exc)}")
+
+    if not combined_ids:
         return items
 
-    last_seen_id = get_hn_high_water_mark()
-    fresh_ids = [sid for sid in story_ids if sid > last_seen_id] if last_seen_id else story_ids
-    skipped = len(story_ids) - len(fresh_ids)
-    if skipped:
-        log.info(f"HN: skipping {skipped} id(s) at or below high-water mark {last_seen_id}.")
-    if not fresh_ids:
+    # Skip only story IDs that already cleared HN_MIN_SCORE in an earlier cycle
+    candidate_ids = [sid for sid in combined_ids[:HN_STORIES_PER_RUN] if sid not in HN_QUALIFIED_IDS_CACHE]
+    if not candidate_ids:
         return items
 
     session = requests.Session()
-    workers = max(1, min(HN_FETCH_WORKERS, len(fresh_ids)))
+    workers = max(1, min(HN_FETCH_WORKERS, len(candidate_ids)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_fetch_hn_item, session, sid) for sid in fresh_ids]
+        futures = [pool.submit(_fetch_hn_item, session, sid) for sid in candidate_ids]
         for future in as_completed(futures):
             result = future.result()
             if result:
+                sid = result.pop("story_id", None)
+                if sid is not None:
+                    HN_QUALIFIED_IDS_CACHE[sid] = True
                 items.append(result)
 
-    set_hn_high_water_mark(max(fresh_ids))
+    if len(HN_QUALIFIED_IDS_CACHE) > 5000:
+        for old_sid in list(HN_QUALIFIED_IDS_CACHE.keys())[:2500]:
+            del HN_QUALIFIED_IDS_CACHE[old_sid]
+
     return items
 
 
@@ -1290,9 +1326,15 @@ def fetch_webpage_summary_snippet(session, url, timeout=6):
     return ""
 
 
+def _wayback_raw_snapshot_url(snapshot_url):
+    """Force Wayback Machine raw 'id_' mode so archived XML feeds are returned without HTML toolbar wrappers."""
+    clean_url = str(snapshot_url or "").replace("http://", "https://")
+    return re.sub(r"/web/(\d+)/", r"/web/\1id_/", clean_url)
+
+
 def fetch_standard_rss(feed_url, source_label=None, source_type="rss", max_items=25):
     """Fetch an RSS/Atom feed with TLS fallback, conditional GET,
-    per-feed cooldown tracking, and a Wayback Machine fallback."""
+    per-feed cooldown tracking, and a raw Wayback Machine fallback."""
     if feed_should_skip_live(feed_url):
         log.info(f"RSS feed on cooldown, skipping attempt: {source_label or feed_url}")
         return []
@@ -1357,7 +1399,7 @@ def fetch_standard_rss(feed_url, source_label=None, source_type="rss", max_items
             if wb_resp.status_code == 200:
                 snapshots = wb_resp.json().get("archived_snapshots", {})
                 if "closest" in snapshots and snapshots["closest"].get("available"):
-                    snapshot_url = snapshots["closest"]["url"].replace("http://", "https://")
+                    snapshot_url = _wayback_raw_snapshot_url(snapshots["closest"]["url"])
                     snap_resp = requests.get(snapshot_url, headers=REQUEST_HEADERS, timeout=30)
                     if snap_resp.status_code == 200:
                         wb_feed = feedparser.parse(snap_resp.content)
@@ -1461,7 +1503,7 @@ def fetch_standard_rss_2(feed_url, source_label=None, source_type="custom_rss", 
             if wb_resp.status_code == 200:
                 snapshots = wb_resp.json().get("archived_snapshots", {})
                 if "closest" in snapshots and snapshots["closest"].get("available"):
-                    snapshot_url = snapshots["closest"]["url"].replace("http://", "https://")
+                    snapshot_url = _wayback_raw_snapshot_url(snapshots["closest"]["url"])
                     snap_resp = requests.get(snapshot_url, headers=REQUEST_HEADERS, timeout=30)
                     if snap_resp.status_code == 200:
                         wb_feed = feedparser.parse(snap_resp.content)
@@ -1633,7 +1675,7 @@ def fetch_universal_html_scrapers():
 
 
 def fetch_sec_edgar():
-    """Search SEC EDGAR filings via EFTS full-text search for AI software stack & quantum computing signals."""
+    """Search SEC EDGAR filings via EFTS full-text search for AI models & software stack signals."""
     items = []
     if not ENABLE_SEC_EDGAR or not SEC_EFTS_QUERY:
         return items
@@ -1730,7 +1772,7 @@ def fetch_sec_edgar():
                 "raw_summary": " | ".join(summary_parts)[:2200],
             })
 
-        log.info(f"sec_edgar: {len(items)} AI-stack/quantum filings matched via EFTS ({start_dt} to {end_dt})")
+        log.info(f"sec_edgar: {len(items)} AI-stack filings matched via EFTS ({start_dt} to {end_dt})")
     except Exception as exc:
         log.error(f"SEC EDGAR EFTS exception: {repr(exc)}")
 
@@ -1793,11 +1835,11 @@ def classify_batch(candidates):
         )
 
     system_prompt = """
-You are a strict AI Software Stack & Quantum Computing filter for a technical trend monitoring bot.
+You are a strict AI Models & Software Stack filter for a technical trend monitoring bot.
 Goal:
-Accept ONLY concrete technical developments, releases, benchmarks, papers, or infrastructure shifts that fall strictly within the following 9 topics (8 AI Software Stack layers + Quantum Computing). Treat all 9 topics with equal importance.
+Accept ONLY concrete technical developments, releases, benchmarks, papers, or architectural shifts that fall strictly within the following 10 AI software & model layers. Treat all 10 layers with equal importance.
 
-Relevant ONLY when the item has concrete technical substance about at least one of these 9 domains:
+Relevant ONLY when the item has concrete technical substance about at least one of these 10 domains:
 
 1. Data Engineering & Preprocessing:
    - Data Wrangling & Pipeline Orchestration (Apache Spark, Ray Data, Polars, DuckDB): distributed ingestion, deduplication (MinHash LSH), heuristic/quality filtering, language ID via fastText, PII redaction, preventing GPU data starvation/under-utilization and data contamination.
@@ -1806,24 +1848,24 @@ Relevant ONLY when the item has concrete technical substance about at least one 
 2. Deep Learning Frameworks & Distributed Training:
    - Core Frameworks (PyTorch, JAX, TensorFlow): execution graphs, autograd, tensor abstractions, torch.compile (TorchDynamo, TorchInductor), automatic kernel fusion.
    - Distributed Parallelism & Scaling Engines (DeepSpeed, Megatron-LM, FSDP / PyTorch Distributed, Ray Train): Tensor Parallelism (TP), Pipeline Parallelism (PP), Data Parallelism / ZeRO (Stages 1/2/3), reducing pipeline bubbles, communication bottlenecks, and backward-pass OOMs.
-   - Fine-Tuning & Alignment Libraries (Hugging Face TRL, Unsloth, Axolotl, PEFT): LoRA, QLoRA, SFT, RLHF, DPO, KTO, VRAM reduction and alignment engineering.
+   - Fine-Tuning & Alignment Libraries (Hugging Face TRL, Unsloth, Axolotl, PEFT): LoRA, QLoRA, SFT, RLHF, DPO, KTO, GRPO, VRAM reduction and alignment engineering.
 
 3. Low-Level GPU Acceleration & Acceleration Kernels:
    - Hardware Drivers & Compute Platforms (NVIDIA CUDA, AMD ROCm, Intel oneAPI): thread schedulers, device runtime, GPU memory buffers, SMs, driver regressions, kernel launch performance.
    - Low-Level Math & Primitive Libraries (cuDNN, cuBLAS, CUTLASS): C++/Assembly GEMM, convolutions, activations, Hopper/Blackwell tensor core FLOPs efficiency.
    - Inter-GPU Communication (NCCL, RCCL): AllReduce, AllGather, ReduceScatter across NVLink, NVSwitch, InfiniBand/RoCE; multi-node synchronization bottlenecks.
-   - Custom Fused Kernels (FlashAttention-2/3, vLLM PagedAttention, Triton): IO-aware fused GPU blocks minimizing HBM-SRAM transfers, cutting attention memory from O(N^2) to O(N) for 32k-1M+ context windows.
+   - Custom Fused Kernels (FlashAttention-2/3/4, vLLM PagedAttention, FlashInfer, Triton): IO-aware fused GPU blocks minimizing HBM-SRAM transfers, cutting attention memory from O(N^2) to O(N) for 32k-1M+ context windows.
 
 4. Model Optimization & Quantization:
-   - Quantization Toolkits (AutoGPTQ, AutoAWQ, bitsandbytes, llama.cpp / GGML / GGUF): INT8, INT4, FP8, FP4, k-quants, Weight-Only or Weight-Activation quantization, shrinking checkpoints 50-75% while preserving perplexity/reasoning.
+   - Quantization Toolkits (AutoGPTQ, AutoAWQ, bitsandbytes, llama.cpp / GGML / GGUF): INT8, INT4, FP8, FP4, NVFP4, k-quants, Weight-Only or Weight-Activation quantization, shrinking checkpoints 50-75% while preserving perplexity/reasoning.
    - Model Compilers & Engines (TensorRT-LLM, ONNX Runtime, TVM, OpenVINO): constant folding, operator fusion, graph compilation for datacenter GPUs/edge/NPUs delivering 2x-4x TTFT & throughput speedups.
 
 5. Serving & Inference Engines:
-   - High-Throughput Engines (vLLM, TGI, TensorRT-LLM, Triton Inference Server): dynamic/continuous batching (iteration-level scheduling), prefix caching, PagedAttention non-contiguous KV-cache allocation, QPS & concurrency scaling.
-   - Local & Edge Runtimes (Ollama, llama.cpp, ExLlamaV2, MLC-LLM): C++ runtimes on Metal/Apple Silicon, Vulkan, CPU AVX-512 for offline private inference.
+   - High-Throughput Engines (vLLM, SGLang, TGI, TensorRT-LLM, Triton Inference Server): dynamic/continuous batching (iteration-level scheduling), prefix caching, PagedAttention non-contiguous KV-cache allocation, disaggregated prefill, QPS & concurrency scaling.
+   - Local & Edge Runtimes (Ollama, llama.cpp, ExLlamaV2/V3, MLC-LLM): C++ runtimes on Metal/Apple Silicon, Vulkan, CPU AVX-512 for offline private inference.
 
 6. Application Orchestration, RAG & Middleware:
-   - Chaining & Agent Frameworks (LangChain, LangGraph, LlamaIndex, CrewAI): tool execution/function calling, multi-turn agent state machines, reducing serialization overhead and agentic drift.
+   - Chaining & Agent Frameworks (LangChain, LangGraph, LlamaIndex, CrewAI, MCP): tool execution/function calling, multi-turn agent state machines, reducing serialization overhead and agentic drift.
    - Vector Databases & Retrieval Engines (Milvus, Qdrant, Chroma, Pinecone, pgvector): embedding indexing, ANN/semantic retrieval latency impact on TTFT, recall quality & hallucination reduction.
    - Guardrails & Structured Parsing (Outlines, Instructor, NeMo Guardrails, Guidance): grammar-constrained decoding (logit masking), JSON schema enforcement, prompt injection defense.
 
@@ -1834,22 +1876,29 @@ Relevant ONLY when the item has concrete technical substance about at least one 
 8. End-User Presentation & Interface (UX):
    - User Interfaces & Prototyping UIs (Open WebUI, LibreChat, Next.js Chat Interfaces, Gradio, Streamlit): markdown/code/LaTeX rendering, smooth token-by-token SSE streaming, optimistic UI updates, graceful timeout/disconnect/context-limit error handling.
 
-9. Quantum Computing:
-   - Physical quantum processors (superconducting, trapped-ion, neutral-atom, photonic, silicon-spin, topological QPUs), fault-tolerant logical qubits, quantum error correction (QEC, surface codes, qLDPC), cryo-CMOS control, quantum interconnects, quantum software stacks/compilers (Qiskit, Cirq, PennyLane, CUDA-Q, Braket), and quantum advantage in chemistry, optimization, or cryptography.
+9. Frontier Foundation Models, Multimodal & Test-Time Compute:
+   - Frontier Model Releases & Architecture (OpenAI, Anthropic, Google DeepMind, Meta AI, DeepSeek, Qwen, Mistral, xAI, MoE architectures, long-context breakthroughs).
+   - Test-Time Compute & Reasoning (dynamic inference-time scaling, process reward models / PRMs, MCTS / tree search, RL for reasoning, formal verification & automated theorem proving).
+   - Multimodal & World Models (native video, image, audio, speech-to-speech, 3D generation, diffusion transformers, and interactive world simulation models).
+
+10. Autonomous Agent Swarms, AI Safety, Interpretability & Evals:
+    - Autonomous Agent Swarms & Computer/Coding Agents (self-directing multi-agent systems that plan, write/verify code, operate computers, and recursively optimize prompts/workflows).
+    - AI Safety, Alignment, Interpretability & Frontier Evals (mechanistic interpretability, sparse autoencoders, scalable oversight, red-teaming, alignment faking/control research, and rigorous capability/safety benchmark releases).
 
 Strictly REJECT / mark irrelevant (score 0-4):
-- Pure physical datacenter/semiconductor manufacturing topics outside our 9 topics (e.g., liquid/immersion cooling, glass substrates, CoWoS packaging, EUV lithography, power busbars, robotics actuators, non-quantum silicon fab capacity).
-- Generic consumer AI app launches, chatbot drama, AI policy/regulation, copyright lawsuits, layoffs, stock price moves, generic company earnings, crypto/Web3, or marketing hype without concrete software-stack or quantum technical substance.
-- Purely theoretical ML papers with no systems, data pipeline, tokenization, distributed training, kernel, quantization, serving, RAG/guardrail, routing, UX, or quantum computing contribution.
+- Physical datacenter/semiconductor hardware (GPU/ASIC silicon manufacturing, HBM/DRAM, CoWoS/TGV packaging, EUV lithography, liquid/immersion cooling, power busbars, robotics actuators) — covered by ai-hardware-bot.
+- Quantum Computing (QPUs, qubits, QEC, cryo-CMOS, quantum SDKs/algorithms) — covered separately to avoid cross-bot overlap.
+- Non-AI deep-tech (biotech, space, fusion, materials science) — covered by frontier-deeptech-bot.
+- Generic consumer app launches, enterprise customer case studies, chatbot drama, AI policy/regulation, copyright lawsuits, layoffs, stock price moves, generic company earnings, crypto/Web3, or marketing hype without concrete model, safety, or software-stack technical substance.
 
 Scoring:
-0-3 = off-topic or outside the 9 allowed topics.
-4-6 = loosely mentions a tool or buzzword, but lacks concrete engineering substance, benchmarks, or architectural impact.
-7-8 = solid technical signal (release, optimization, architecture deep dive, benchmark, or paper) clearly addressing a bottleneck in one of the 9 topics.
-9-10 = major breakthrough, flagship release, step-change kernel/compiler/serving speedup, or landmark fault-tolerant quantum computing milestone.
+0-3 = off-topic, excluded hardware/quantum domain, or marketing/customer fluff.
+4-6 = loosely mentions a model or tool, but lacks concrete engineering substance, benchmarks, weights, or architectural impact.
+7-8 = solid technical signal (release, optimization, architecture deep dive, benchmark, interpretability study, or paper) clearly advancing one of the 10 layers.
+9-10 = flagship frontier model launch, step-change kernel/compiler/serving speedup, or landmark reasoning/agentic/safety breakthrough.
 
 Strict rule:
-Set relevant=true ONLY when score >= 7 AND the item strictly maps to one of the 9 topics above.
+Set relevant=true ONLY when score >= 7 AND the item strictly maps to one of the 10 layers above.
 
 Return only valid JSON using this schema:
 {
@@ -1858,12 +1907,12 @@ Return only valid JSON using this schema:
       "index": 0,
       "relevant": true,
       "score": 8,
-      "category": "Short sub-category (e.g., Custom Fused Kernels, Quantization Toolkits, Vector Databases, Quantum Error Correction)",
-      "stack_layer": "1. Data Engineering & Preprocessing / 2. Deep Learning Frameworks & Distributed Training / 3. Low-Level GPU Acceleration & Acceleration Kernels / 4. Model Optimization & Quantization / 5. Serving & Inference Engines / 6. Application Orchestration, RAG & Middleware / 7. API Gateway & Model Routing / 8. End-User Presentation & Interface (UX) / 9. Quantum Computing",
-      "bottleneck_addressed": "data throughput / tokenization / distributed scaling / kernel IO / collective comms / quantization / compiler TTFT / serving concurrency / RAG recall / guardrails / gateway routing / streaming UX / quantum error correction / qubit scaling / other",
-      "specific_tech": "Short concrete technology name (e.g., FlashAttention-3, vLLM prefix caching, TorchInductor, GGUF k-quants, Qiskit QEC)",
+      "category": "Short sub-category (e.g., Custom Fused Kernels, Frontier Multimodal Model, Mechanistic Interpretability, Serving Engines)",
+      "stack_layer": "1. Data Engineering & Preprocessing / 2. Deep Learning Frameworks & Distributed Training / 3. Low-Level GPU Acceleration & Acceleration Kernels / 4. Model Optimization & Quantization / 5. Serving & Inference Engines / 6. Application Orchestration, RAG & Middleware / 7. API Gateway & Model Routing / 8. End-User Presentation & Interface (UX) / 9. Frontier Foundation Models, Multimodal & Test-Time Compute / 10. Autonomous Agent Swarms, AI Safety, Interpretability & Evals",
+      "bottleneck_addressed": "data throughput / tokenization / distributed scaling / kernel IO / collective comms / quantization / compiler TTFT / serving concurrency / RAG recall / guardrails / gateway routing / streaming UX / reasoning scaling / multimodal world modeling / agent autonomy / interpretability & alignment / other",
+      "specific_tech": "Short concrete technology or model name (e.g., FlashAttention-3, vLLM prefix caching, TorchInductor, GGUF k-quants, AlphaProof Code)",
       "why_it_matters": "One or two factual sentences explaining the technical mechanism or benchmark improvement.",
-      "ai_stack_thesis": "One sentence on how this improves AI stack latency, throughput, memory efficiency, reliability, or quantum capability.",
+      "ai_stack_thesis": "One sentence on how this improves AI model capability, safety, latency, throughput, memory efficiency, or reliability.",
       "telegram_summary": "Short Telegram-ready summary."
     }
   ]
@@ -1871,7 +1920,7 @@ Return only valid JSON using this schema:
 """
 
     user_prompt = {
-        "instruction": "Classify every item strictly against ONLY the 9 allowed topics. Reject off-topic hardware, hype, and fluff. Only output JSON.",
+        "instruction": "Classify every item strictly against ONLY the 10 AI Models & Software Stack layers. Reject physical hardware, quantum computing, customer-story fluff, and hype. Only output JSON.",
         "items": compact_items,
     }
 
@@ -2272,13 +2321,13 @@ def print_config():
     log.info(f"MAX_ALERTS_PER_FLUSH: {MAX_ALERTS_PER_FLUSH}")
     log.info(f"DIGEST_MAX_ITEMS: {DIGEST_MAX_ITEMS}")
     log.info(f"ENABLE_ARXIV: {ENABLE_ARXIV} categories: {ARXIV_CATEGORIES} per category: {ARXIV_RESULTS_PER_CATEGORY}")
-    log.info(f"ENABLE_HACKERNEWS: {ENABLE_HACKERNEWS} HN_NEW_STORIES_PER_RUN: {HN_NEW_STORIES_PER_RUN} workers: {HN_FETCH_WORKERS} high_water_mark: {get_hn_high_water_mark()}")
+    log.info(f"ENABLE_HACKERNEWS: {ENABLE_HACKERNEWS} HN_STORIES_PER_RUN: {HN_STORIES_PER_RUN} HN_MIN_SCORE: {HN_MIN_SCORE} workers: {HN_FETCH_WORKERS}")
     log.info(f"ENABLE_TECHMEME: {ENABLE_TECHMEME} TECHMEME_MAX_ITEMS: {TECHMEME_MAX_ITEMS}")
     log.info(f"ENABLE_SPECIALIST_RSS: {ENABLE_SPECIALIST_RSS} feeds: {len(get_feed_specs('SPECIALIST_RSS_FEEDS', DEFAULT_SPECIALIST_RSS_FEEDS))} per feed: {SPECIALIST_RSS_MAX_ITEMS_PER_FEED}")
     log.info(f"ENABLE_ECOSYSTEM_RELEASES_RSS: {ENABLE_ECOSYSTEM_RELEASES_RSS} feeds: {len(get_feed_specs('ECOSYSTEM_RELEASES_RSS_FEEDS', DEFAULT_ECOSYSTEM_RELEASES_RSS_FEEDS))} per feed: {ECOSYSTEM_RELEASES_MAX_ITEMS_PER_FEED}")
     log.info(f"ENABLE_HTML_SCRAPER: {ENABLE_HTML_SCRAPER} targets: {len(get_feed_specs('HTML_SCRAPER_TARGETS', DEFAULT_HTML_SCRAPER_TARGETS))} per site: {HTML_SCRAPER_MAX_ITEMS_PER_SITE}")
     log.info(f"ENABLE_SEC_EDGAR: {ENABLE_SEC_EDGAR} forms: {SEC_FORMS} lookback_days: {SEC_LOOKBACK_DAYS} max_items: {SEC_MAX_ITEMS_PER_FETCH}")
-    log.info(f"Tracked domains: {len(STACK_DOMAIN_TAXONOMY)} (8 AI Software Stack layers + Quantum Computing)")
+    log.info(f"Tracked domains: {len(STACK_DOMAIN_TAXONOMY)} (10 AI Models & Software Stack layers)")
     log.info(f"Telegram token found: {bool(TELEGRAM_BOT_TOKEN)}")
     log.info(f"Telegram chat found: {bool(TELEGRAM_CHAT_ID)}")
     log.info(f"OpenRouter key found: {bool(OPENROUTER_API_KEY)}")
@@ -2290,7 +2339,7 @@ def main():
 
     if SEND_STARTUP_MESSAGE:
         send_telegram(
-            f"✅ AI Software Stack &amp; Quantum Computing monitor started.\n"
+            f"✅ AI Models &amp; Software Stack monitor started.\n"
             f"Fetch every {FETCH_MINUTES} min, flush check every {CHECK_QUEUE_SECONDS}s "
             f"(queue ≥{QUEUE_FLUSH_LIMIT} or {FORCE_FLUSH_MINUTES} min stale triggers a flush)."
         )
